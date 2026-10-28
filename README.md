@@ -13,7 +13,7 @@
 | Login JWT com usuários de demonstração (senhas só como hash) | Implementado | Testes de integração + `curl` contra o container |
 | Isolamento por usuário (UserId sempre do token) | Implementado | Testes: usuário B não vê nem altera tarefas de A |
 | `GET /api/health`, `GET /api/tasks` (leitura auxiliar) | Implementado | Testes de integração + `curl` |
-| Angular: login, tela de tarefas, formulário, filtros, agrupamento por categoria, seção **Urgentes** | Implementado | 73 testes Vitest + teste manual no navegador |
+| Angular: login, tela de tarefas, formulário, filtros, agrupamento por categoria, seção **Urgentes** | Implementado | 76 testes Vitest + teste manual no navegador |
 | Regra `urgente` (palavra inteira, sem diferenciar caixa, título ou descrição) calculada no cliente | Implementado | Testes unitários e manual (sobe ao topo ao salvar) |
 | IndexedDB (Dexie) por usuário: tarefa + mutação pendente na mesma transação, coalescência, logout preservando dados | Implementado | Testes com IndexedDB em memória (falha injetada, inflight congelada) + inspeção no navegador |
 | Sincronização push/pull, indicador `Sincronizando`/`Sincronizado`, conflitos na UI | **Não implementado** (Fase B) | — |
@@ -63,7 +63,9 @@ npm ci
 npm start
 ```
 
-Abra `http://localhost:4200`. O dev server encaminha `/api` para `http://localhost:5080` (`proxy.conf.json`). No Windows, pare o `npm start` antes de rodar `npm ci` de novo (o dev server mantém o `esbuild.exe` aberto).
+Abra `http://localhost:4200`. O dev server encaminha `/api` para `http://localhost:5080` (`proxy.conf.json`).
+
+No Windows, pare o `npm start` antes de rodar `npm ci` de novo: o dev server mantém o `esbuild.exe` aberto e o `npm ci` falha com `EPERM` depois de já ter apagado parte do `node_modules`. O servidor, ainda rodando, recompila sem o TypeScript e o navegador mostra `TS6053: File '.../node_modules/typescript/lib/lib.es2022.full.d.ts' not found`. Para corrigir: pare o servidor, rode `npm ci` e inicie `npm start` de novo (não é preciso mudar `tsconfig` nem `package-lock.json`).
 
 ### Usuários de demonstração
 
@@ -86,7 +88,7 @@ dotnet test Way2.Todo.slnx
 dotnet test Way2.Todo.slnx --filter "Category!=Integration"
 ```
 
-Frontend (73 testes, IndexedDB em memória com `fake-indexeddb`) e build de produção:
+Frontend (76 testes, IndexedDB em memória com `fake-indexeddb`) e build de produção:
 
 ```bash
 cd src/frontend/todo-web
@@ -94,7 +96,7 @@ npm test -- --watch=false
 npm run build
 ```
 
-Resultados da última execução (28/10/2026): backend 35/35 aprovados, frontend 73/73 aprovados, build do frontend sem avisos.
+Resultados da última execução (28/10/2026): backend 35/35 aprovados, frontend 76/76 aprovados, build do frontend sem avisos.
 
 ## Configuração
 
@@ -159,7 +161,7 @@ Resumo das premissas e decisões de implementação.
 
 ## Apoio do Claude Code
 
-A Fase A foi implementada com apoio do Claude Code (Anthropic): revisão do planejamento e resolução de conflitos entre os documentos, implementação do backend, do frontend, dos testes e desta documentação. Cada fatia foi verificada antes do commit com build e testes automatizados; a API foi testada com `curl` no container e o frontend com um teste manual no navegador (login, urgente no topo, edição, conclusão, recarga, logout/login e isolamento entre os dois usuários). O README final detalhará o apoio em todas as fases.
+A Fase A foi implementada com apoio do Claude Code (Anthropic): revisão do planejamento e resolução de conflitos entre os documentos, implementação do backend, do frontend, dos testes e desta documentação. Cada fatia foi verificada antes do commit com build e testes automatizados; a API foi testada com `curl` no container e o frontend com um teste manual no navegador (login válido e inválido, criação, urgente no topo, edição, conclusão, exclusão, filtros, agrupamento, tarefa vencida, recarga, logout/login e isolamento entre os dois usuários), conferindo console e requisições. O README final detalhará o apoio em todas as fases.
 
 ## Documentação
 

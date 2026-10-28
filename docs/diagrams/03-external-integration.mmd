@@ -1,0 +1,25 @@
+sequenceDiagram
+    autonumber
+    participant C as Cliente sincronizador
+    participant API as ASP.NET Core
+    participant DB as PostgreSQL
+    participant W as BackgroundService
+    participant X as Consumidor simulado
+    C->>API: Push operação offline (operationId)
+    API->>DB: Inicia transação
+    API->>DB: Altera tarefa + registra operação + change log
+    API->>DB: Insere evento na integration_outbox
+    API->>DB: Commit
+    API-->>C: applied
+    Note over C,X: Somente eventos confirmados no servidor saem para integrações
+    loop Enquanto houver eventos pendentes
+        W->>DB: Reserva próximo evento elegível
+        W->>X: POST /webhooks/todo-events (eventId)
+        alt Sucesso 2xx (inclusive duplicata)
+            X-->>W: 200/204
+            W->>DB: Marca deliveredAt
+        else Erro ou timeout
+            X--xW: Falha
+            W->>DB: Registra falha e nextRetryAt
+        end
+    end

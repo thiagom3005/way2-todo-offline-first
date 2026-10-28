@@ -1,0 +1,36 @@
+sequenceDiagram
+    autonumber
+    actor User as Usuário
+    participant UI as Angular/Signals
+    participant IDB as IndexedDB
+    participant S as SyncEngine
+    participant API as .NET Sync API
+    participant DB as PostgreSQL
+    User->>UI: Cria/edita tarefa offline
+    UI->>IDB: Grava tarefa e operação pendente em transação
+    IDB-->>UI: Confirmado
+    UI-->>User: Mostra tarefa e indicador pendente
+    Note over UI,API: Tarefa urgente sobe imediatamente, sem servidor
+    User->>UI: Reconecta / abre / retoma foco
+    UI->>S: Iniciar sincronização
+    S->>IDB: Carrega operações pendentes
+    loop Por tarefa e em ordem
+        S->>API: POST /api/sync/push (operationId, baseVersion)
+        API->>DB: Transação: versão + dedupe + change log + outbox
+        alt Versão compatível
+            DB-->>API: Commit
+            API-->>S: applied/duplicate e snapshot aceito
+            S->>IDB: Confirma operação sem perder edições mais novas
+        else Conflito
+            API-->>S: conflict e snapshot remoto
+            S->>IDB: Guarda ambas as versões
+            S-->>UI: Exibir decisão de conflito
+        end
+    end
+    S->>API: GET /api/sync/pull?cursor=N
+    API->>DB: Busca alterações confirmadas por usuário
+    DB-->>API: Página e nova revisão
+    API-->>S: changes, nextCursor, hasMore
+    S->>IDB: Aplica itens não dirty e avança cursor em transação
+    IDB-->>UI: Dados atualizados
+    UI-->>User: Sincronizado ou conflito pendente

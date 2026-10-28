@@ -1,0 +1,27 @@
+# IDEs
+.vs/
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.user
+*.suo
+
+# .NET
+bin/
+obj/
+TestResults/
+*.trx
+
+# Node / Angular
+node_modules/
+dist/
+.angular/
+coverage/
+
+# Ambiente local (nunca versionar segredos)
+.env
+*.local.json
+
+# SO
+.DS_Store
+Thumbs.db

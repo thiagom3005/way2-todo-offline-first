@@ -1,0 +1,17 @@
+flowchart TB
+    U[Usuário em desktop ou celular] --> A[Angular PWA]
+    subgraph Client[Navegador]
+        A --> I[(IndexedDB: tarefas locais)]
+        A --> Q[(Outbox local: operações pendentes)]
+        SW[Service Worker: shell offline] --> A
+        SE[SyncEngine] --> I
+        SE --> Q
+    end
+    SE <-->|HTTPS REST push e pull| API[ASP.NET Core: monólito modular]
+    subgraph Backend[API e infraestrutura]
+        API --> T[Tasks + Sync + Identity]
+        T --> PG[(PostgreSQL: tasks, sync log, operações, outbox)]
+        W[BackgroundService] --> PG
+    end
+    W -->|HTTP webhook at-least-once| EXT[Consumidor externo simulado]
+    EXT --> D[(Registro de eventos recebidos)]

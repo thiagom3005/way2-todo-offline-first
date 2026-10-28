@@ -1,6 +1,8 @@
 # Contrato de sincronização v1
 
-> Design proposto para o desafio; ainda não é implementação. O contrato usa HTTP/JSON, UUIDs e revisão monotônica **por usuário**.
+> O contrato usa HTTP/JSON, UUIDs e revisão monotônica **por usuário**.
+>
+> **Estado da implementação:** `POST /api/auth/login` e os [endpoints auxiliares](#endpoints-auxiliares-fase-a) estão implementados e testados (Fase A). `POST /api/sync/push`, `GET /api/sync/pull` e o webhook ainda são design (Fases B e C).
 
 ## Convenções
 
@@ -10,6 +12,7 @@
 - `dueDate`: data civil `YYYY-MM-DD` ou `null` (sem problemas de fuso horário).
 - `createdAt`/`updatedAt`/`deletedAt`: instantes ISO 8601 UTC; servidor registra `updatedAt/deletedAt`. `createdAt` pode ser originalmente gerado no cliente offline.
 - Categorias: campo `category` não vazio; agrupamento simples por string. Sem entidade independente neste MVP.
+- Validação (servidor e cliente): `title` obrigatório, 1–200 caracteres após `trim`; `description` até 2000 (vazia vira `null`); `category` obrigatória, 1–50 após `trim` (o formulário sugere `Geral`); `createdAt` deve ser instante UTC. Chaves de erro usam os nomes JSON (`title`, `category`, ...).
 - Enumeração `priority`: `low` | `medium` | `high`. `status`: `pending` | `completed`.
 - Os exemplos usam UUIDs e instantes ilustrativos, **não são dados reais**.
 
@@ -38,6 +41,14 @@ Resposta `200`:
 ```
 
 Credenciais finais de teste devem estar descritas no README da aplicação. Primeira autenticação requer rede. Depois de autenticar, app usa dados locais offline, mas push/pull espera uma sessão válida.
+
+Erros:
+
+- `400` (`ValidationProblem`): `email` ou `password` ausentes.
+- `401` (`ProblemDetails`, `title: "Credenciais inválidas."`): resposta **idêntica** para e-mail inexistente e senha errada (o custo de hash também é equalizado, para não permitir enumerar usuários).
+- `429`: limite de 20 tentativas por minuto por IP.
+
+O JWT (HMAC-SHA256) carrega `sub` (UserId) e `email`; `expiresAt` é exatamente o `exp` do token. Não há refresh token: com o token expirado o cliente continua editando localmente e mostra `auth_required` até novo login.
 
 ## Modelo de tarefa (snapshot)
 
@@ -125,7 +136,11 @@ Resultados possíveis por operação:
 
 - `applied`: operação aceita, versão incrementada, evento de integração gravado na Outbox.
 - `duplicate`: mesmo `operationId` já confirmado anteriormente. Resposta retorna **o resultado original armazenado**, sem executar mutação/emitir outro evento.
-- `conflict`: a `baseVersion` não corresponde à versão atual. Inclui snapshot atual da tarefa, com tombstone se aplicável.
+- `conflict`: operação recusada sem alterar nada, com `reason`:
+  - `version_mismatch`: `baseVersion` diferente da versão atual; inclui `serverTask`.
+  - `deleted`: a tarefa já é um tombstone; inclui `serverTask` com `deletedAt`.
+  - `already_exists`: criação com `taskId` já usado; `serverTask` só é preenchido se a tarefa for do próprio usuário.
+  - `not_found`: update/delete de tarefa inexistente **ou de outro usuário**; `serverTask` é `null` (nunca expõe dados de outra conta).
 - `validation_error`: campos inválidos; não alterar o servidor, retornar detalhes de validação.
 - Falhas transitórias de banco/rede respondem com `5xx` ou falha de conexão. Cliente reenvia a **mesma operação**, sem substituir `operationId`.
 
@@ -245,6 +260,7 @@ O estado `online` do navegador **não** prova conectividade com o backend. O ind
 
 ## 5. Tratamento de edições durante o envio
 
+- Ciclo de vida de `local_mutations.status`: `pending` (nunca enviada; pode ser coalescida com edições seguintes da mesma tarefa) → `inflight` (selecionada para envio) → removida no ack. Uma mutação `inflight` **nunca volta** a `pending`, mesmo após timeout: retries reenviam exatamente a mesma operação.
 - Enquanto uma operação está `inflight`, seu `operationId` e `payload` ficam **congelados**.
 - Se o usuário altera a mesma tarefa durante a requisição, gravar novo intento `pending` (não alterar a cópia em voo) e manter UI exibindo o snapshot mais recente.
 - Quando o primeiro ack chega, seu `serverTask.version` passa a ser a `baseVersion` do próximo intento; o ack não pode substituir os novos valores locais da UI.
@@ -287,6 +303,13 @@ O backend cria um evento de integração na Outbox durante o commit da tarefa. U
 - **At-least-once**, não exactly-once. Se o POST foi recebido mas a confirmação se perdeu, ocorrerá retry e o consumidor deduplicará.
 - Para a prova, um worker único entrega eventos sequencialmente. Não promover eventos posteriores da mesma tarefa se evento anterior ainda estiver pendente. Ordenação entre tarefas diferentes não é requisito.
 - Em ambiente real, autenticar webhook com assinatura HMAC ou mTLS conforme contrato, limitar exposição de dados e segredos.
+
+## Endpoints auxiliares (Fase A)
+
+Não fazem parte do fluxo de sincronização; existem para operação e demonstração.
+
+- `GET /api/health` (anônimo): `200 {"status":"healthy"}` quando o PostgreSQL responde; `503` caso contrário. Na Fase B também servirá de sondagem real de conectividade do `SyncEngine`.
+- `GET /api/tasks` (Bearer obrigatório): tarefas **ativas** do usuário do token (sem tombstones), no formato do snapshot acima, ordenadas por `createdAt`. É somente leitura: o cliente offline não o usa; toda escrita será feita via `POST /api/sync/push`, para existir um único caminho com idempotência, change log e outbox.
 
 ## 7. Cenários de teste de contrato
 

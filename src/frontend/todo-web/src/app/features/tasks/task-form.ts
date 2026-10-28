@@ -1,4 +1,14 @@
-import { Component, computed, effect, inject, input, output } from '@angular/core';
+import {
+  afterRenderEffect,
+  Component,
+  computed,
+  effect,
+  type ElementRef,
+  inject,
+  input,
+  output,
+  viewChild,
+} from '@angular/core';
 import { toSignal } from '@angular/core/rxjs-interop';
 import {
   type AbstractControl,
@@ -23,7 +33,7 @@ const notBlank = (control: AbstractControl<string>): ValidationErrors | null =>
   selector: 'app-task-form',
   imports: [ReactiveFormsModule],
   template: `
-    <form [formGroup]="form" (ngSubmit)="submit()" class="card stack task-form">
+    <form #formElement [formGroup]="form" (ngSubmit)="submit()" class="card stack task-form">
       <div class="form-header">
         <h2>{{ task() ? 'Editar tarefa' : 'Nova tarefa' }}</h2>
         @if (urgent()) {
@@ -33,7 +43,7 @@ const notBlank = (control: AbstractControl<string>): ValidationErrors | null =>
 
       <label>
         Título
-        <input formControlName="title" [maxlength]="limits.title" data-testid="title" />
+        <input #titleInput formControlName="title" [maxlength]="limits.title" data-testid="title" />
       </label>
       @if (form.controls.title.touched && form.controls.title.invalid) {
         <small class="error">Informe um título.</small>
@@ -112,6 +122,8 @@ export class TaskForm {
   private readonly value = toSignal(this.form.valueChanges, {
     initialValue: this.form.getRawValue(),
   });
+  private readonly formElement = viewChild.required<ElementRef<HTMLFormElement>>('formElement');
+  private readonly titleInput = viewChild.required<ElementRef<HTMLInputElement>>('titleInput');
 
   /** Prévia imediata da regra de urgência enquanto o usuário digita. */
   protected readonly urgent = computed(() => {
@@ -121,6 +133,12 @@ export class TaskForm {
 
   constructor() {
     effect(() => this.load(this.task()));
+    // A tarefa editada pode estar bem abaixo na lista: leva o usuário até o formulário.
+    afterRenderEffect(() => {
+      if (!this.task()) return;
+      this.formElement().nativeElement.scrollIntoView({ block: 'start' });
+      this.titleInput().nativeElement.focus({ preventScroll: true });
+    });
   }
 
   protected submit(): void {

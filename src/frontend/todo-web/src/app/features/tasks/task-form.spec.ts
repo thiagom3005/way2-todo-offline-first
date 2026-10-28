@@ -2,6 +2,21 @@ import { TestBed } from '@angular/core/testing';
 import type { LocalTask, TaskFields } from '../../core/offline/local-models';
 import { TaskForm } from './task-form';
 
+const existingTask: LocalTask = {
+  id: 't1',
+  title: 'Revisar contrato',
+  description: null,
+  dueDate: null,
+  priority: 'low',
+  status: 'completed',
+  category: 'Trabalho',
+  createdAt: '2026-10-28T12:00:00.000Z',
+  updatedAt: '2026-10-28T12:00:00.000Z',
+  deletedAt: null,
+  serverVersion: 2,
+  syncState: 'synced',
+};
+
 async function render(task: LocalTask | null = null) {
   const fixture = TestBed.createComponent(TaskForm);
   fixture.componentRef.setInput('task', task);
@@ -75,21 +90,7 @@ describe('TaskForm', () => {
   });
 
   it('em edição carrega a tarefa e preserva o status', async () => {
-    const task: LocalTask = {
-      id: 't1',
-      title: 'Revisar contrato',
-      description: null,
-      dueDate: null,
-      priority: 'low',
-      status: 'completed',
-      category: 'Trabalho',
-      createdAt: '2026-10-28T12:00:00.000Z',
-      updatedAt: '2026-10-28T12:00:00.000Z',
-      deletedAt: null,
-      serverVersion: 2,
-      syncState: 'synced',
-    };
-    const { saved, field, type, submit } = await render(task);
+    const { saved, field, type, submit } = await render(existingTask);
     expect(field<HTMLInputElement>('title').value).toBe('Revisar contrato');
 
     await type('title', 'Revisar contrato assinado');
@@ -100,5 +101,19 @@ describe('TaskForm', () => {
       status: 'completed',
       dueDate: null,
     });
+  });
+
+  it('ao entrar em edição rola até o formulário e foca o título', async () => {
+    const scroll = vi.spyOn(Element.prototype, 'scrollIntoView');
+    const { fixture, el, field } = await render();
+    expect(scroll).not.toHaveBeenCalled();
+
+    fixture.componentRef.setInput('task', existingTask);
+    await fixture.whenStable();
+
+    expect(scroll).toHaveBeenCalledOnce();
+    expect(scroll.mock.contexts[0]).toBe(el.querySelector('form'));
+    expect(document.activeElement).toBe(field('title'));
+    scroll.mockRestore();
   });
 });

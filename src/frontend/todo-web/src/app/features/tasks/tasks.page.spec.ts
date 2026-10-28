@@ -113,6 +113,23 @@ describe('TasksPage', () => {
     expect(statusText()).toContain('Nenhuma alteração local pendente');
   });
 
+  it('filtro de categoria volta para "todas" quando a última tarefa da categoria some', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    await addTask('Regar plantas', 'Casa');
+    await addTask('Ligar para cliente', 'Trabalho');
+    await until(() => expect(sectionKeys()).toEqual(['category:casa', 'category:trabalho']));
+
+    const categoryFilter = el.querySelector<HTMLSelectElement>('select[aria-label="Categoria"]')!;
+    categoryFilter.value = 'trabalho';
+    categoryFilter.dispatchEvent(new Event('change'));
+    await until(() => expect(sectionKeys()).toEqual(['category:trabalho']));
+
+    card('Ligar para cliente').querySelector<HTMLButtonElement>('button.danger')!.click();
+
+    await until(() => expect(sectionKeys()).toEqual(['category:casa']));
+    expect(categoryFilter.value).toBe('');
+  });
+
   it('sair encerra a sessão mas preserva tarefas e pendências do usuário', async () => {
     await addTask('Tarefa offline', 'Campo');
     await until(() => expect(titlesIn('category:campo')).toEqual(['Tarefa offline']));

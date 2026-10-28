@@ -1,4 +1,4 @@
-import { Component, computed, inject, signal } from '@angular/core';
+import { Component, computed, effect, inject, signal } from '@angular/core';
 import { toSignal } from '@angular/core/rxjs-interop';
 import { Router } from '@angular/router';
 import { from } from 'rxjs';
@@ -47,6 +47,17 @@ export class TasksPage {
   );
   protected readonly categories = computed(() => listCategories(this.tasks()));
   protected readonly categoryLabels = computed(() => this.categories().map((c) => c.label));
+
+  constructor() {
+    // Categoria filtrada que deixou de existir (última tarefa excluída ou movida) volta para
+    // "todas"; senão o seletor exibiria "Todas as categorias" com a lista vazia por um filtro oculto.
+    effect(() => {
+      const { category } = this.filters();
+      if (category && !this.categories().some((option) => option.key === category)) {
+        this.setFilter('category', '');
+      }
+    });
+  }
 
   protected async save(fields: TaskFields): Promise<void> {
     const editing = this.editing();

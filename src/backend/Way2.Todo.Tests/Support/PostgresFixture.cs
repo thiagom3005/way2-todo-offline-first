@@ -9,8 +9,12 @@ namespace Way2.Todo.Tests.Support;
 public sealed class PostgresFixture : IAsyncLifetime
 {
     private readonly PostgreSqlContainer _container = new PostgreSqlBuilder("postgres:17-alpine").Build();
+    private ApiFactory? _api;
 
     public string ConnectionString => _container.GetConnectionString();
+
+    /// <summary>Uma única instância da API para a coleção (startup aplica migrations e seed de demo).</summary>
+    public ApiFactory Api => _api ??= new ApiFactory(ConnectionString);
 
     public async Task InitializeAsync()
     {
@@ -19,7 +23,12 @@ public sealed class PostgresFixture : IAsyncLifetime
         await db.Database.MigrateAsync();
     }
 
-    public Task DisposeAsync() => _container.DisposeAsync().AsTask();
+    public async Task DisposeAsync()
+    {
+        if (_api is not null)
+            await _api.DisposeAsync();
+        await _container.DisposeAsync();
+    }
 
     public TodoDbContext CreateDbContext()
     {

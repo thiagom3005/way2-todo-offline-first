@@ -19,5 +19,23 @@ services:
       timeout: 3s
       retries: 20
 
+  api:
+    build:
+      context: src/backend/Way2.Todo.Api
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ConnectionStrings__Todo: "Host=db;Port=5432;Database=${POSTGRES_DB:-way2_todo};Username=${POSTGRES_USER:-way2};Password=${POSTGRES_PASSWORD:-way2_dev_only}"
+      Database__ApplyMigrationsOnStartup: "true"
+      Jwt__SigningKey: ${JWT_SIGNING_KEY:-dev-only-signing-key-do-not-use-in-production-0123456789}
+      DemoSeed__Enabled: ${DEMO_SEED_ENABLED:-true}
+      DemoSeed__Users__0__Email: demo@way2.local
+      DemoSeed__Users__0__Password: ${DEMO_PASSWORD:-Way2Demo!2026}
+      DemoSeed__Users__1__Email: demo2@way2.local
+      DemoSeed__Users__1__Password: ${DEMO_PASSWORD:-Way2Demo!2026}
+    ports:
+      - "${API_PORT:-5080}:8080"
+
 volumes:
   pgdata:

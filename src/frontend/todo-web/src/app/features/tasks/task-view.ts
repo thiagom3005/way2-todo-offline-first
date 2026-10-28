@@ -86,7 +86,8 @@ export function buildTaskSections(
     sections.push({ key: 'urgent', title: 'Urgentes', kind: 'urgent', tasks: urgent });
   }
 
-  const labels = categoryLabels(sorted);
+  // Rótulos calculados sobre todas as tarefas ativas: filtrar não muda o título do grupo.
+  const labels = categoryLabels(tasks.filter((task) => task.deletedAt === null));
   const byCategory = new Map<string, TaskSection>();
   for (const task of sorted) {
     if (isUrgent(task)) continue;

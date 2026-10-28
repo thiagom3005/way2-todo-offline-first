@@ -146,6 +146,13 @@ describe('buildTaskSections', () => {
     expect(titles(sections[0].tasks)).toEqual(['Pagar conta urgente']);
   });
 
+  it('o título do grupo não muda quando o filtro esconde a tarefa que define a grafia', () => {
+    // "Lavar carro" usa " CASA "; o rótulo do grupo vem de "Regar plantas" (mais antiga).
+    const sections = buildTaskSections(tasks, { ...NO_FILTERS, text: 'lavar' }, true);
+
+    expect(sections.map((s) => s.title)).toEqual(['Casa']);
+  });
+
   it('remover "urgente" na edição devolve a tarefa ao grupo da categoria', () => {
     const edited = tasks.map((t) =>
       t.title === 'Pagar conta urgente' ? { ...t, title: 'Pagar conta' } : t,

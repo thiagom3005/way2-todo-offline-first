@@ -301,9 +301,20 @@ button:disabled {
     grid-template-columns: 1fr 1fr;
   }
 
+  /* Seletores na largura do conteúdo (sem cortar "Todas as categorias"); quebra linha se faltar espaço. */
   .filters {
-    grid-template-columns: 2fr 1fr 1fr 1fr auto;
+    display: flex;
+    flex-wrap: wrap;
     align-items: center;
+  }
+
+  .filters input[type='search'] {
+    flex: 1 1 220px;
+    width: auto;
+  }
+
+  .filters select {
+    width: auto;
   }
 
   .task {

@@ -25,3 +25,6 @@ coverage/
 # SO
 .DS_Store
 Thumbs.db
+
+# Configuração local de ferramentas (preview do Claude Code)
+.claude/

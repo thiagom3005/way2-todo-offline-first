@@ -1,0 +1,99 @@
+<header class="topbar">
+  <div>
+    <h1>Minhas tarefas</h1>
+    <small class="muted">{{ user()?.email }}</small>
+  </div>
+  <button type="button" (click)="logout()">Sair</button>
+</header>
+
+<p class="sync-status" [class.warn]="sessionExpired()" role="status" data-testid="sync-status">
+  @if (sessionExpired()) {
+    Sessão expirada: suas alterações continuam salvas neste dispositivo. Entre novamente para
+    sincronizar.
+  } @else if (pendingCount() > 0) {
+    {{ pendingCount() }} {{ pendingCount() === 1 ? 'alteração salva' : 'alterações salvas' }} apenas
+    neste dispositivo — a sincronização com o servidor ainda não foi implementada.
+  } @else {
+    Nenhuma alteração local pendente.
+  }
+</p>
+
+@if (error()) {
+  <p class="error" role="alert">{{ error() }}</p>
+}
+
+<main class="layout">
+  <app-task-form
+    [task]="editing()"
+    [categories]="categoryLabels()"
+    (saved)="save($event)"
+    (cancelled)="editing.set(null)"
+  />
+
+  <section class="card filters" aria-label="Filtros">
+    <input
+      #search
+      type="search"
+      placeholder="Buscar no título ou descrição"
+      [value]="filters().text"
+      (input)="setFilter('text', search.value)"
+      data-testid="filter-text"
+    />
+    <select #category (change)="setFilter('category', category.value)" aria-label="Categoria">
+      <option value="" [selected]="!filters().category">Todas as categorias</option>
+      @for (option of categories(); track option.key) {
+        <option [value]="option.key" [selected]="filters().category === option.key">
+          {{ option.label }}
+        </option>
+      }
+    </select>
+    <select #status (change)="setFilter('status', status.value)" aria-label="Status">
+      <option value="all">Todos os status</option>
+      <option value="pending">Pendentes</option>
+      <option value="completed">Concluídas</option>
+    </select>
+    <select #priority (change)="setFilter('priority', priority.value)" aria-label="Prioridade">
+      <option value="all">Todas as prioridades</option>
+      <option value="high">Alta</option>
+      <option value="medium">Média</option>
+      <option value="low">Baixa</option>
+    </select>
+    <label class="inline">
+      <input
+        type="checkbox"
+        [checked]="groupByCategory()"
+        (change)="groupByCategory.set(!groupByCategory())"
+      />
+      Agrupar por categoria
+    </label>
+  </section>
+
+  @for (section of sections(); track section.key) {
+    <section
+      class="task-section"
+      [class.urgent-section]="section.kind === 'urgent'"
+      [attr.data-section]="section.key"
+    >
+      <h2>
+        {{ section.title }} <span class="count">{{ section.tasks.length }}</span>
+      </h2>
+      @for (task of section.tasks; track task.id) {
+        <app-task-item
+          [task]="task"
+          [today]="today()"
+          (toggled)="toggle(task)"
+          (edit)="editing.set(task)"
+          (remove)="remove(task)"
+        />
+      }
+    </section>
+  } @empty {
+    <p class="empty muted">
+      {{
+        tasks().length
+          ? 'Nenhuma tarefa corresponde aos filtros.'
+          : 'Nenhuma tarefa ainda. Adicione a primeira acima.'
+      }}
+    </p>
+  }
+</main>

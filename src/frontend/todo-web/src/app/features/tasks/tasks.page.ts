@@ -1,4 +1,4 @@
-import { Component, computed, DestroyRef, effect, inject, signal } from '@angular/core';
+import { Component, computed, DestroyRef, effect, inject, signal, viewChild } from '@angular/core';
 import { toSignal } from '@angular/core/rxjs-interop';
 import { Router } from '@angular/router';
 import { from } from 'rxjs';
@@ -39,6 +39,7 @@ export class TasksPage {
   protected readonly groupByCategory = signal(true);
   protected readonly editing = signal<LocalTask | null>(null);
   protected readonly error = signal<string | null>(null);
+  private readonly taskForm = viewChild.required(TaskForm);
 
   protected readonly sections = computed(() =>
     buildTaskSections(this.tasks(), this.filters(), this.groupByCategory()),
@@ -62,7 +63,7 @@ export class TasksPage {
 
   protected async save(fields: TaskFields): Promise<void> {
     const editing = this.editing();
-    await this.run(async () => {
+    const saved = await this.run(async () => {
       if (editing) {
         // A cópia exibida ao abrir o formulário: mudança remota nesse meio-tempo vira conflito.
         await this.repository.update(editing.id, fields, editing);
@@ -71,9 +72,11 @@ export class TasksPage {
         await this.repository.create(fields);
       }
     });
+    // Só limpa depois de gravado: se o IndexedDB falhar (cota), o texto digitado não se perde.
+    if (saved && !editing) this.taskForm().clearForNext();
   }
 
-  protected toggle(task: LocalTask): Promise<void> {
+  protected toggle(task: LocalTask): Promise<boolean> {
     return this.run(() =>
       this.repository.setStatus(task.id, task.status === 'completed' ? 'pending' : 'completed'),
     );
@@ -103,7 +106,12 @@ export class TasksPage {
     this.filters.update((current) => ({ ...current, [key]: value as TaskFilters[K] }));
   }
 
-  /** Sai preservando tarefas e pendências locais (também usado para "Entrar novamente"). */
+  /** Login de novo sem sair: offline, a sessão atual continua dando acesso às tarefas locais. */
+  protected reauthenticate(): void {
+    void this.router.navigateByUrl('/login');
+  }
+
+  /** Sai preservando tarefas e pendências locais no banco do usuário. */
   protected logout(): void {
     this.sync.stop();
     this.auth.logout();
@@ -111,13 +119,15 @@ export class TasksPage {
     void this.router.navigateByUrl('/login');
   }
 
-  private async run(action: () => Promise<unknown>): Promise<void> {
+  private async run(action: () => Promise<unknown>): Promise<boolean> {
     this.error.set(null);
     try {
       await action();
       this.sync.requestSync();
+      return true;
     } catch {
       this.error.set('Não foi possível salvar neste dispositivo. Tente novamente.');
+      return false;
     }
   }
 }

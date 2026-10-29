@@ -184,7 +184,7 @@ export class SyncService {
   private async runOnce(): Promise<void> {
     const session = this.session;
     if (!session) return;
-    if (this.auth.isTokenExpired()) {
+    if (this.auth.needsSignIn()) {
       // Edição local continua; nenhuma requisição até um novo login.
       this.outcome.set('auth');
       return;
@@ -215,6 +215,8 @@ export class SyncService {
         this.schedule(backoffDelay(this.failures, this.timing));
         break;
       case 'auth':
+        // 401: o token não serve mais, mesmo dentro do prazo local. Libera a tela de login.
+        this.auth.markTokenRejected();
         this.outcome.set('auth');
         this.nextRetryAt.set(null);
         break;

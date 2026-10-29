@@ -65,8 +65,8 @@ describe('TaskForm', () => {
     expect(el.textContent).toContain('Informe um título.');
   });
 
-  it('envia campos normalizados com vencimento date-only e limpa o título', async () => {
-    const { saved, field, type, submit } = await render();
+  it('envia campos normalizados com vencimento date-only e só limpa quando a página confirma', async () => {
+    const { fixture, saved, field, type, submit } = await render();
 
     await type('title', '  Conferir medição  ');
     await type('description', '   ');
@@ -85,8 +85,27 @@ describe('TaskForm', () => {
         category: 'Campo',
       },
     ]);
+    // A gravação é assíncrona e pode falhar: o texto fica até a página confirmar.
+    expect(field<HTMLInputElement>('title').value).toBe('  Conferir medição  ');
+
+    fixture.componentInstance.clearForNext();
+    await fixture.whenStable();
     expect(field<HTMLInputElement>('title').value).toBe('');
+    expect(field<HTMLInputElement>('due-date').value).toBe('');
     expect(field<HTMLInputElement>('category').value).toBe(' Campo ');
+    expect(field<HTMLSelectElement>('priority').value).toBe('high');
+  });
+
+  it('não apaga o que o usuário começou a digitar antes de a gravação anterior terminar', async () => {
+    const { fixture, field, type, submit } = await render();
+    await type('title', 'Primeira');
+    await submit();
+
+    await type('title', 'Segunda, digitada durante a gravação');
+    fixture.componentInstance.clearForNext(); // confirmação da primeira chega agora
+    await fixture.whenStable();
+
+    expect(field<HTMLInputElement>('title').value).toBe('Segunda, digitada durante a gravação');
   });
 
   it('em edição carrega a tarefa e preserva o status', async () => {

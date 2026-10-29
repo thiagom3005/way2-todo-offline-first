@@ -122,6 +122,7 @@ export class TaskForm {
   private readonly value = toSignal(this.form.valueChanges, {
     initialValue: this.form.getRawValue(),
   });
+  private lastSubmitted: ReturnType<typeof this.form.getRawValue> | null = null;
   private readonly formElement = viewChild.required<ElementRef<HTMLFormElement>>('formElement');
   private readonly titleInput = viewChild.required<ElementRef<HTMLInputElement>>('titleInput');
 
@@ -147,6 +148,7 @@ export class TaskForm {
       return;
     }
     const value = this.form.getRawValue();
+    this.lastSubmitted = value;
     this.saved.emit({
       title: value.title.trim(),
       description: value.description.trim() || null,
@@ -155,10 +157,20 @@ export class TaskForm {
       status: this.task()?.status ?? 'pending',
       category: value.category.trim(),
     });
-    if (!this.task()) {
-      // Mantém categoria e prioridade para agilizar cadastros em sequência.
-      this.form.reset({ ...value, title: '', description: '', dueDate: '' });
-    }
+  }
+
+  /**
+   * Depois de uma criação gravada: limpa o texto e mantém categoria e prioridade para a próxima. Se o
+   * usuário já começou outra tarefa enquanto a gravação terminava, nada do que ele digitou é apagado.
+   */
+  clearForNext(): void {
+    const current = this.form.getRawValue();
+    const untouched =
+      this.lastSubmitted !== null &&
+      (Object.keys(current) as (keyof typeof current)[]).every(
+        (key) => current[key] === this.lastSubmitted![key],
+      );
+    if (untouched) this.form.reset({ ...current, title: '', description: '', dueDate: '' });
   }
 
   private load(task: LocalTask | null): void {

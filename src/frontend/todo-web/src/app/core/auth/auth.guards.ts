@@ -6,8 +6,8 @@ import { AuthService } from './auth.service';
 export const authGuard: CanActivateFn = () =>
   inject(AuthService).user() ? true : inject(Router).createUrlTree(['/login']);
 
-/** Evita a tela de login quando já existe sessão válida. */
+/** Evita a tela de login quando a sessão ainda serve; vencida ou recusada, o login fica acessível. */
 export const guestGuard: CanActivateFn = () => {
   const auth = inject(AuthService);
-  return auth.user() && !auth.isTokenExpired() ? inject(Router).createUrlTree(['/tasks']) : true;
+  return auth.user() && !auth.needsSignIn() ? inject(Router).createUrlTree(['/tasks']) : true;
 };

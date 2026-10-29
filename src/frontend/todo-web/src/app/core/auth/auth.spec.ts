@@ -16,7 +16,7 @@ import {
 import { authGuard, guestGuard } from './auth.guards';
 import { authInterceptor } from './auth.interceptor';
 import { AuthService, SESSION_STORAGE_KEY, type AuthSession } from './auth.service';
-import { loginErrorMessage } from './login.page';
+import { LoginPage, loginErrorMessage } from './login.page';
 
 const session = (expiresAt: string): AuthSession => ({
   accessToken: 'header.payload.signature',
@@ -85,6 +85,20 @@ describe('AuthService', () => {
     expect(auth.user()).toBeNull();
   });
 
+  it('401 dentro do prazo exige novo login, e um login bem-sucedido limpa a recusa', async () => {
+    const { auth, backend } = setup(session(future()));
+
+    auth.markTokenRejected();
+    expect(auth.isTokenExpired()).toBe(false);
+    expect(auth.needsSignIn()).toBe(true);
+    expect(auth.user()?.email).toBe('demo@way2.local'); // uso local continua
+
+    const login = auth.login('demo@way2.local', 'senha');
+    backend.expectOne('/api/auth/login').flush(session(future()));
+    await login;
+    expect(auth.needsSignIn()).toBe(false);
+  });
+
   it('logout remove apenas a sessão', () => {
     const { auth } = setup(session(future()));
     localStorage.setItem('outra-chave', 'mantida');
@@ -137,6 +151,40 @@ describe('guards', () => {
     TestBed.resetTestingModule();
     setup(session(past()));
     expect(runGuard(guestGuard)).toBe(true);
+  });
+
+  it('guestGuard libera o login quando o servidor recusou um token ainda no prazo', () => {
+    const { auth } = setup(session(future()));
+    auth.markTokenRejected();
+
+    expect(runGuard(guestGuard)).toBe(true);
+  });
+});
+
+describe('LoginPage', () => {
+  afterEach(() => localStorage.clear());
+
+  async function render() {
+    const fixture = TestBed.createComponent(LoginPage);
+    await fixture.whenStable();
+    return fixture.nativeElement as HTMLElement;
+  }
+
+  it('na reautenticação oferece a volta às tarefas e já traz o e-mail da sessão', async () => {
+    setup(session(past()));
+    const el = await render();
+
+    expect(el.querySelector('[data-testid="back-to-tasks"]')?.getAttribute('href')).toBe('/tasks');
+    expect(el.querySelector<HTMLInputElement>('input[type="email"]')!.value).toBe('demo@way2.local');
+    expect(el.textContent).toContain('Sua sessão expirou');
+  });
+
+  it('no primeiro acesso não há atalho para as tarefas', async () => {
+    setup();
+    const el = await render();
+
+    expect(el.querySelector('[data-testid="back-to-tasks"]')).toBeNull();
+    expect(el.textContent).toContain('O primeiro acesso exige conexão');
   });
 });
 

@@ -218,13 +218,16 @@ describe('SyncService', () => {
     expect(service.pendingCount()).toBe(1);
   });
 
-  it('401 do servidor também leva a auth_required', async () => {
+  it('401 do servidor também leva a auth_required e para as requisições até um novo login', async () => {
     setup();
     server.authExpired = true;
 
     service.start(userId, db);
 
     await vi.waitFor(() => expect(service.status()).toBe('auth_required'));
+    const requests = calls.health;
+    await service.syncNow();
+    expect(calls.health).toBe(requests);
   });
 
   it('conflito tem prioridade no indicador', async () => {

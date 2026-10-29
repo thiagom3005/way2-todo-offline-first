@@ -1,14 +1,15 @@
 import { provideHttpClient } from '@angular/common/http';
 import { provideHttpClientTesting } from '@angular/common/http/testing';
 import { type ComponentFixture, TestBed } from '@angular/core/testing';
-import { provideRouter } from '@angular/router';
+import { provideRouter, Router } from '@angular/router';
 import Dexie from 'dexie';
-import { SESSION_STORAGE_KEY } from '../../core/auth/auth.service';
+import { AuthService, SESSION_STORAGE_KEY } from '../../core/auth/auth.service';
 import { LocalDatabase } from '../../core/offline/local-database';
+import { LocalTaskRepository } from '../../core/offline/local-task-repository';
 import { TodoLocalDb } from '../../core/offline/todo-local-db';
 import { newUuid } from '../../core/offline/uuid';
 import { SYNC_API } from '../../core/sync/http-sync-api';
-import { DEFAULT_SYNC_TIMING, SYNC_TIMING } from '../../core/sync/sync.service';
+import { DEFAULT_SYNC_TIMING, SYNC_TIMING, SyncService } from '../../core/sync/sync.service';
 import { FakeSyncServer } from '../../core/sync/testing/fake-sync-server';
 import { SyncDevice } from '../../core/sync/testing/sync-device';
 import { TasksPage } from './tasks.page';
@@ -198,6 +199,60 @@ describe('TasksPage', () => {
       other.db.close();
       await Dexie.delete(other.db.name);
     }
+  });
+
+  it('"Entrar novamente" leva ao login sem encerrar a sessão (offline, as tarefas continuam acessíveis)', async () => {
+    server.reachable = true;
+    server.authExpired = true; // 401 com o token ainda no prazo local
+    await until(() => expect(statusState()).toBe('auth_required'));
+    expect(statusText()).toContain('Sessão expirada. Entre novamente para sincronizar.');
+    await addTask('Feita sem sessão válida', 'Campo');
+    await until(() => expect(statusText()).toContain('1 alteração salva neste dispositivo'));
+
+    Array.from(el.querySelectorAll('button'))
+      .find((b) => b.textContent?.trim() === 'Entrar novamente')!
+      .click();
+
+    await vi.waitFor(() => expect(TestBed.inject(Router).url).toBe('/login'));
+    expect(localStorage.getItem(SESSION_STORAGE_KEY)).not.toBeNull();
+    const auth = TestBed.inject(AuthService);
+    expect(auth.user()?.id).toBe(userId);
+    expect(auth.needsSignIn()).toBe(true); // o guestGuard deixa a tela de login abrir
+  });
+
+  it('o formulário só limpa depois que a tarefa foi gravada no dispositivo', async () => {
+    const create = vi
+      .spyOn(LocalTaskRepository.prototype, 'create')
+      .mockRejectedValueOnce(new DOMException('Cota excedida (simulado).', 'QuotaExceededError'));
+    const title = () =>
+      el.querySelector<HTMLInputElement>('app-task-form [data-testid="title"]')!.value;
+
+    await addTask('Não perder este texto', 'Campo');
+    await until(() => expect(el.querySelector('p.error')?.textContent).toContain('Não foi possível salvar'));
+    expect(title()).toBe('Não perder este texto');
+
+    el.querySelector('app-task-form form')!.dispatchEvent(new Event('submit'));
+    await until(() => expect(titlesIn('category:campo')).toEqual(['Não perder este texto']));
+    expect(title()).toBe('');
+    expect(create).toHaveBeenCalledTimes(2);
+  });
+
+  it('lista vazia enquanto sincroniza não afirma que não há tarefas', async () => {
+    await until(() => expect(el.querySelector('.empty')?.textContent).toContain('Nenhuma tarefa ainda'));
+    // Primeira sincronização de um dispositivo novo: a resposta do servidor ainda não chegou.
+    vi.spyOn(TestBed.inject(SYNC_API), 'health').mockReturnValue(new Promise(() => {}));
+
+    void TestBed.inject(SyncService).syncNow();
+
+    await until(() =>
+      expect(el.querySelector('.empty')?.textContent).toContain('Buscando suas tarefas no servidor'),
+    );
+  });
+
+  it('a busca tem nome acessível além do placeholder', () => {
+    expect(el.querySelector('[data-testid="filter-text"]')!.getAttribute('aria-label')).toBe(
+      'Buscar no título ou descrição',
+    );
   });
 
   it('sair encerra a sessão mas preserva tarefas e pendências do usuário', async () => {

@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Way2.Todo.Api.Sync;
@@ -27,6 +28,24 @@ public sealed class SyncApiTests(PostgresFixture fixture)
         Assert.Equal(revisions, page.Changes.Select(c => c.Revision));
         Assert.Equal(nextCursor, page.NextCursor);
         Assert.Equal(hasMore, page.HasMore);
+    }
+
+    [Fact]
+    public async Task A_push_body_over_the_size_limit_is_rejected_before_any_processing()
+    {
+        // O limite é aplicado pelo servidor HTTP (IHttpMaxRequestBodySizeFeature), que o TestServer não tem: Kestrel real.
+        await using var api = new ApiFactory(fixture.ConnectionString);
+        api.UseKestrel(0);
+        api.StartServer();
+        var (client, userId) = await fixture.NewUserClientAsync(api);
+        var padding = new string('a', 2 * SyncLimits.MaxPushBodyBytes);
+        using var body = new StringContent(
+            $$"""{"deviceId":"{{DeviceId}}","operations":[],"padding":"{{padding}}"}""", Encoding.UTF8, "application/json");
+
+        var response = await client.PostAsync("/api/sync/push", body);
+
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
+        await AssertServerStateAsync(userId, processed: 0);
     }
 
     [Fact]

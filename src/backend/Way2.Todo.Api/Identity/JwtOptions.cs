@@ -26,6 +26,8 @@ public sealed class JwtOptions
         ValidateAudience = true,
         ValidateLifetime = true,
         ValidateIssuerSigningKey = true,
+        // Só o algoritmo que a API emite: um token com outro "alg" é recusado mesmo com a chave certa.
+        ValidAlgorithms = [SecurityAlgorithms.HmacSha256],
         ClockSkew = TimeSpan.FromSeconds(30),
     };
 }

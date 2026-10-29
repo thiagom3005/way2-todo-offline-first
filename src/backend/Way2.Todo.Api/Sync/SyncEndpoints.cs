@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using Microsoft.AspNetCore.Mvc;
 using Way2.Todo.Api.Identity;
 
 namespace Way2.Todo.Api.Sync;
@@ -9,7 +10,7 @@ public static class SyncEndpoints
     {
         // UserId sempre vem do token; nada no corpo identifica o usuário.
         var sync = app.MapGroup("/api/sync").RequireAuthorization();
-        sync.MapPost("/push", PushAsync);
+        sync.MapPost("/push", PushAsync).WithMetadata(new RequestSizeLimitAttribute(SyncLimits.MaxPushBodyBytes));
         sync.MapGet("/pull", PullAsync);
         return app;
     }

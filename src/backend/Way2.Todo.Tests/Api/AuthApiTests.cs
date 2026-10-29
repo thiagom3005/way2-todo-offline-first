@@ -1,6 +1,12 @@
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Claims;
+using System.Text;
 using System.Text.Json;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.IdentityModel.JsonWebTokens;
+using Microsoft.IdentityModel.Tokens;
 using Way2.Todo.Api.Identity;
 using Way2.Todo.Tests.Support;
 
@@ -58,6 +64,33 @@ public sealed class AuthApiTests(PostgresFixture fixture)
         var errors = problem.RootElement.GetProperty("errors");
         Assert.True(errors.TryGetProperty("email", out _));
         Assert.True(errors.TryGetProperty("password", out _));
+    }
+
+    [Fact]
+    public async Task A_token_signed_with_another_hmac_algorithm_is_rejected_even_with_the_right_key()
+    {
+        // 64 bytes: chave válida também para HS512, para que só o algoritmo diferencie os dois tokens.
+        const string key = "test-only-signing-key-long-enough-for-hs512-0123456789abcdefghij";
+        await using var api = new ApiFactory(fixture.ConnectionString, builder => builder.UseSetting("Jwt:SigningKey", key));
+        var user = await fixture.CreateUserAsync();
+
+        async Task<HttpStatusCode> ListTasksWith(string algorithm)
+        {
+            var token = new JsonWebTokenHandler().CreateToken(new SecurityTokenDescriptor
+            {
+                Issuer = ApiFactory.Jwt.Issuer,
+                Audience = ApiFactory.Jwt.Audience,
+                Subject = new ClaimsIdentity([new Claim(JwtRegisteredClaimNames.Sub, user.Id.ToString())]),
+                Expires = DateTime.UtcNow.AddMinutes(5),
+                SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(Encoding.UTF8.GetBytes(key)), algorithm),
+            });
+            var client = api.CreateClient();
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            return (await client.GetAsync("/api/tasks")).StatusCode;
+        }
+
+        Assert.Equal(HttpStatusCode.OK, await ListTasksWith(SecurityAlgorithms.HmacSha256));
+        Assert.Equal(HttpStatusCode.Unauthorized, await ListTasksWith(SecurityAlgorithms.HmacSha512));
     }
 
     private static async Task<string> TitleOf(HttpResponseMessage response)

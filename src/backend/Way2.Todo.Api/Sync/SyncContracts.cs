@@ -75,6 +75,12 @@ public static class SyncActions
 public static class SyncLimits
 {
     public const int MaxOperationsPerPush = 50;
+
+    /// <summary>
+    /// 1 MiB (o padrão do Kestrel é 30 MB). O maior push válido fica abaixo de ~700 KB: 50 operações com
+    /// 2.250 caracteres de texto cada, mesmo no pior caso de escape JSON (6 bytes por caractere).
+    /// </summary>
+    public const int MaxPushBodyBytes = 1024 * 1024;
     public const int DefaultPullLimit = 100;
     public const int MaxPullLimit = 500;
 }

@@ -4,8 +4,11 @@ using Way2.Todo.Api.Identity;
 
 namespace Way2.Todo.Tests.Support;
 
-/// <summary>API real em memória apontando para o PostgreSQL do Testcontainers, com configuração explícita de teste.</summary>
-public sealed class ApiFactory(string connectionString) : WebApplicationFactory<Program>
+/// <summary>
+/// API real em memória apontando para o PostgreSQL do Testcontainers, com configuração explícita de teste.
+/// <paramref name="configure"/> permite variações (proxy confiável, outra chave) numa instância separada.
+/// </summary>
+public sealed class ApiFactory(string connectionString, Action<IWebHostBuilder>? configure = null) : WebApplicationFactory<Program>
 {
     public const string AliceEmail = "alice@test.local";
     public const string BobEmail = "bob@test.local";
@@ -36,5 +39,6 @@ public sealed class ApiFactory(string connectionString) : WebApplicationFactory<
         builder.UseSetting("DemoSeed:Users:1:Password", Password);
         // Testes chamam o dispatcher diretamente (DispatchOnceAsync); o loop em segundo plano fica desligado.
         builder.UseSetting("Outbox:DispatcherEnabled", "false");
+        configure?.Invoke(builder);
     }
 }

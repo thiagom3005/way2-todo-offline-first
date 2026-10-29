@@ -18,6 +18,7 @@ builder.Services.AddProblemDetails();
 builder.Services.ConfigureHttpJsonOptions(json =>
     json.SerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase)));
 
+builder.Services.AddReverseProxySupport();
 builder.Services.AddIdentityModule();
 builder.Services.AddScoped<TaskCommandService>();
 builder.Services.AddScoped<SyncService>();
@@ -25,6 +26,7 @@ builder.Services.AddIntegrationsModule();
 
 var app = builder.Build();
 
+app.UseReverseProxySupport(); // antes de tudo que lê o IP do cliente (rate limit do login)
 app.UseExceptionHandler();
 app.UseStatusCodePages();
 app.UseAuthentication();

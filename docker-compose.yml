@@ -1,7 +1,7 @@
 name: way2-todo
 
 # Ambiente local de desenvolvimento/demonstração. Valores padrão são apenas para dev;
-# sobrescreva via arquivo .env (veja .env.example).
+# sobrescreva via arquivo .env (veja .env.example). Portas publicadas só em 127.0.0.1.
 services:
   db:
     image: postgres:17-alpine
@@ -10,7 +10,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-way2}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-way2_dev_only}
     ports:
-      - "${POSTGRES_PORT:-5433}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -37,8 +37,10 @@ services:
       # Webhooks da outbox. Sem depends_on no consumidor: a API funciona (e acumula eventos) com ele fora do ar.
       Webhook__Url: http://consumer:8080/webhooks/todo-events
       Webhook__Secret: ${WEBHOOK_SECRET:-dev-only-webhook-secret-do-not-use-in-production-0123456789}
+      # Único proxy confiável para X-Forwarded-For (rate limit por cliente): o IP fixo do nginx.
+      ReverseProxy__KnownProxies__0: ${WEB_PROXY_IP:-172.30.240.10}
     ports:
-      - "${API_PORT:-5080}:8080"
+      - "127.0.0.1:${API_PORT:-5080}:8080"
 
   # Consumidor externo simulado: recebe os webhooks, deduplica por eventId e mantém uma projeção somente
   # leitura. Sem credenciais de banco nem token da API. Painel e falhas simuladas só em 127.0.0.1.
@@ -60,8 +62,18 @@ services:
       context: src/frontend/todo-web
     depends_on:
       - api
+    networks:
+      default:
+        ipv4_address: ${WEB_PROXY_IP:-172.30.240.10}
     ports:
-      - "${WEB_PORT:-4280}:80"
+      - "127.0.0.1:${WEB_PORT:-4280}:80"
+
+# Sub-rede fixa para o IP do nginx ser conhecido pela API (ajuste COMPOSE_SUBNET/WEB_PROXY_IP se colidir).
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${COMPOSE_SUBNET:-172.30.240.0/24}
 
 volumes:
   pgdata:

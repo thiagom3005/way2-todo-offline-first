@@ -148,7 +148,7 @@ public sealed class OutboxDispatcherTests(PostgresFixture fixture)
     }
 
     [Fact]
-    public async Task Timeout_is_recorded_and_releases_the_rest_of_the_batch_without_spending_attempts()
+    public async Task Timeout_is_recorded_and_defers_the_rest_of_the_batch_without_spending_attempts()
     {
         var (client, userId) = await IsolatedUserAsync();
         await PushOneAsync(client, Upsert(Guid.NewGuid(), null, "A"));
@@ -163,17 +163,57 @@ public sealed class OutboxDispatcherTests(PostgresFixture fixture)
         };
         var dispatcher = Dispatcher();
 
-        Assert.Equal(2, await dispatcher.DispatchOnceAsync());
+        Assert.Equal(0, await dispatcher.DispatchOnceAsync()); // inalcançável: o laço espera
 
         var timedOut = await EventAsync(a);
         Assert.Equal((OutboxStatuses.Pending, 1, (int?)null, "Timeout"), (timedOut.Status, timedOut.Attempts, timedOut.LastStatusCode, timedOut.LastError));
         var released = await EventAsync(b);
-        Assert.Equal((OutboxStatuses.Pending, 0), (released.Status, released.Attempts));
+        Assert.Equal((OutboxStatuses.Pending, 0, timedOut.NextRetryAt), (released.Status, released.Attempts, released.NextRetryAt));
         Assert.Null(released.ClaimToken);
         Assert.Equal([a], Sent());
 
-        Assert.Equal(1, await dispatcher.DispatchOnceAsync()); // B segue; A está em backoff
+        Assert.Equal(0, await dispatcher.DispatchOnceAsync()); // B espera a mesma janela de A
+        clock.UtcNow = clock.UtcNow.AddSeconds(3);
+        Assert.Equal(2, await dispatcher.DispatchOnceAsync());
+        Assert.Equal([a, a, b], Sent());
         Assert.Equal(OutboxStatuses.Delivered, (await EventAsync(b)).Status);
+    }
+
+    [Fact]
+    public async Task An_unreachable_consumer_gets_one_attempt_per_backoff_window_not_one_per_event()
+    {
+        var (client, userId) = await IsolatedUserAsync();
+        foreach (var title in new[] { "A", "B", "C" })
+            await PushOneAsync(client, Upsert(Guid.NewGuid(), null, title));
+        var events = await NewEventsAsync(userId);
+        var (a, b, c) = (events[0].EventId, events[1].EventId, events[2].EventId);
+        var down = true;
+        webhook.Respond = (_, _, _) => down
+            ? throw new HttpRequestException(HttpRequestError.ConnectionError, "Conexão recusada (simulada).")
+            : Task.FromResult(HttpStatusCode.OK);
+        var dispatcher = Dispatcher();
+
+        // Janela 1: uma tentativa; B e C não gastam tentativa e esperam o retry de A (2s).
+        Assert.Equal(0, await dispatcher.DispatchOnceAsync());
+        Assert.Equal(0, await dispatcher.DispatchOnceAsync());
+        Assert.Equal([a], Sent());
+
+        // Janela 2: de novo uma tentativa só, e o backoff cresce (4s) para todo o lote.
+        clock.UtcNow = clock.UtcNow.AddSeconds(3);
+        Assert.Equal(0, await dispatcher.DispatchOnceAsync());
+        Assert.Equal(0, await dispatcher.DispatchOnceAsync());
+        Assert.Equal([a, a], Sent());
+        var retry = await EventAsync(a);
+        Assert.Equal((2, "Falha de conexão (ConnectionError)"), (retry.Attempts, retry.LastError));
+        foreach (var waiting in new[] { b, c })
+            Assert.Equal((0, retry.NextRetryAt), ((await EventAsync(waiting)).Attempts, (await EventAsync(waiting)).NextRetryAt));
+
+        // Consumidor de volta: tudo sai no mesmo ciclo, em ordem.
+        down = false;
+        clock.UtcNow = clock.UtcNow.AddSeconds(5);
+        Assert.Equal(3, await dispatcher.DispatchOnceAsync());
+        Assert.Equal([a, a, a, b, c], Sent());
+        Assert.All(await EventsOfAsync(userId), e => Assert.Equal(OutboxStatuses.Delivered, e.Status));
     }
 
     [Theory]

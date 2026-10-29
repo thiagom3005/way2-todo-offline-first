@@ -190,7 +190,7 @@ describe('SyncEngine (dois dispositivos, mesmo servidor)', () => {
     await b.sync();
     expect(await b.visibleTitles()).toEqual([]);
 
-    await b.store.applyPullPage(oldPage);
+    await b.store.applyPullPage(oldPage, 0);
     expect(await b.visibleTitles()).toEqual([]);
     expect(await b.task(task.id)).toMatchObject({ serverVersion: 2 });
   });
@@ -233,9 +233,9 @@ describe('SyncEngine (dois dispositivos, mesmo servidor)', () => {
     const b = device({ pullLimit: 2 });
     const apply = b.store.applyPullPage.bind(b.store);
     let pages = 0;
-    vi.spyOn(b.store, 'applyPullPage').mockImplementation(async (page) => {
+    vi.spyOn(b.store, 'applyPullPage').mockImplementation(async (page, cursor) => {
       if (++pages === 2) throw new Error('aba fechada no meio do pull (simulado)');
-      return apply(page);
+      return apply(page, cursor);
     });
 
     expect(await b.sync()).toMatchObject({ kind: 'error' });

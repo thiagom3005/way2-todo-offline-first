@@ -254,6 +254,38 @@ describe('Resolução de conflitos', () => {
     expect(await b.task(task.id)).toMatchObject({ serverVersion: 1, syncState: 'synced' });
   });
 
+  it('criação recusada e depois excluída: "Enviar novamente" não deixa exclusão presa na fila', async () => {
+    server.rejectTitle = 'Título recusado';
+    const task = await b.repo.create(fields({ title: 'Título recusado' }));
+    await b.sync();
+    const conflict = (await b.db.conflicts.get(task.id))!;
+    expect(conflict.reason).toBe('validation_error');
+    await b.repo.delete(task.id);
+
+    expect(await keepMine(b, conflict)).toBe('resolved');
+
+    expect(await b.mutations()).toEqual([]);
+    expect(await b.task(task.id)).toBeUndefined();
+    expect(await b.sync()).toMatchObject({ kind: 'ok', pushed: 0 });
+    expect(server.tasks.size).toBe(0);
+  });
+
+  it('"Manter minha alteração" numa tarefa excluída aqui e lá não a ressuscita como nova', async () => {
+    const { task, conflict } = await concurrentEdit();
+    await a.repo.delete(task.id);
+    await a.sync(); // servidor: excluída (v3)
+    await b.repo.delete(task.id); // B também exclui, com o conflito aberto
+    await b.sync(); // pull registra o snapshot excluído
+
+    expect(await keepMine(b, conflict)).toBe('resolved');
+
+    expect(await b.mutations()).toEqual([]);
+    expect(await b.visibleTitles()).toEqual([]);
+    expect(await b.task(task.id)).toMatchObject({ serverVersion: 3, syncState: 'synced' });
+    await b.sync();
+    expect([...server.tasks.values()].filter((t) => t.deletedAt === null)).toEqual([]);
+  });
+
   it('formulário aberto durante um pull não sobrescreve a mudança do outro dispositivo', async () => {
     const task = await a.repo.create(fields({ title: 'Original' }));
     await a.sync();

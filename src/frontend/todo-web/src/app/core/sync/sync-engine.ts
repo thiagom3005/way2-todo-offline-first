@@ -70,8 +70,9 @@ export class SyncEngine {
       let pulled = 0;
       for (let page = 0; page < this.options.maxPullPages; page++) {
         signal?.throwIfAborted();
-        const response = await this.api.pull(await this.store.cursor(), this.options.pullLimit);
-        await this.store.applyPullPage(response);
+        const cursor = await this.store.cursor();
+        const response = await this.api.pull(cursor, this.options.pullLimit);
+        await this.store.applyPullPage(response, cursor);
         pulled += response.changes.length;
         if (!response.hasMore) break;
       }

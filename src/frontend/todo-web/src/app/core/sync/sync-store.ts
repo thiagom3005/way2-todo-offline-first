@@ -92,9 +92,10 @@ export class SyncStore {
   /**
    * Aplica uma página do pull e avança o cursor na mesma transação. Tarefa com mutação local não tem a
    * cópia de trabalho sobrescrita (só registra a versão remota); versão já conhecida é ignorada, o que
-   * torna o replay seguro e impede ressuscitar tarefas excluídas.
+   * torna o replay seguro e impede ressuscitar tarefas excluídas. O cursor só avança se ainda for o da
+   * requisição: um "Descartar" que o rebaixou durante o pull não é desfeito.
    */
-  applyPullPage(page: PullResponse): Promise<void> {
+  applyPullPage(page: PullResponse, requestedCursor: number): Promise<void> {
     return this.db.transaction(
       'rw',
       this.db.local_tasks,
@@ -117,7 +118,9 @@ export class SyncStore {
           if (local?.serverVersion != null && remote.version <= local.serverVersion) continue;
           await this.db.local_tasks.put(fromServer(remote));
         }
-        await this.db.sync_metadata.put({ key: CURSOR_KEY, value: page.nextCursor });
+        if ((await this.cursor()) === requestedCursor) {
+          await this.db.sync_metadata.put({ key: CURSOR_KEY, value: page.nextCursor });
+        }
       },
     );
   }
@@ -213,8 +216,19 @@ export class SyncStore {
       async ({ conflict, task, server }) => {
         if (!task) return;
         const now = this.now().toISOString();
-        const recreate =
-          conflict.reason !== 'validation_error' && (server === null || server.deletedAt !== null);
+        // Sem snapshot, validation_error não diz nada sobre o servidor: só a versão conhecida diz.
+        const goneOnServer = server
+          ? server.deletedAt !== null
+          : conflict.reason !== 'validation_error' || task.serverVersion === null;
+
+        if (task.deletedAt !== null && goneOnServer) {
+          // Excluída aqui e ausente (ou excluída) lá: as duas pontas concordam, não há o que enviar.
+          if (server) await this.db.local_tasks.put(fromServer(server));
+          else await this.db.local_tasks.delete(taskId);
+          return;
+        }
+
+        const recreate = conflict.reason !== 'validation_error' && goneOnServer;
 
         if (recreate) {
           if (server) await this.db.local_tasks.put(fromServer(server));

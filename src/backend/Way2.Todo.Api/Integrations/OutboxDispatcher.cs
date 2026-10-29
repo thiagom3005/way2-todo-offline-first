@@ -71,7 +71,10 @@ public sealed class OutboxDispatcher(
         }
     }
 
-    /// <summary>Um ciclo: reserva as cabeças elegíveis e tenta entregá-las. Devolve quantas reservou.</summary>
+    /// <summary>
+    /// Um ciclo: reserva as cabeças elegíveis e tenta entregá-las. Devolve quantas reservou, ou 0 se o
+    /// consumidor ficou inalcançável — o laço então espera o próximo intervalo em vez de reivindicar na hora.
+    /// </summary>
     public async Task<int> DispatchOnceAsync(CancellationToken ct = default)
     {
         var outbox = outboxOptions.Value;
@@ -91,12 +94,13 @@ public sealed class OutboxDispatcher(
                 continue;
 
             var attempt = await SendAsync(http, outboxEvent, webhook, ct);
-            await RecordAsync(outboxEvent, claimToken, attempt, outbox, ct);
+            var nextRetryAt = await RecordAsync(outboxEvent, claimToken, attempt, outbox, ct);
             if (attempt.Unreachable)
             {
-                // Consumidor inalcançável: não gasta tentativas dos demais nem prende o ciclo em timeouts.
-                await ReleaseAsync(claimed.Skip(i + 1).Select(e => e.EventId).ToList(), claimToken, ct);
-                break;
+                // Consumidor inalcançável: o resto do lote espera a mesma janela de backoff sem gastar
+                // tentativas — uma tentativa por janela, não uma por evento em sequência.
+                await ReleaseAsync(claimed.Skip(i + 1).Select(e => e.EventId).ToList(), claimToken, nextRetryAt, ct);
+                return 0;
             }
         }
         return claimed.Count;
@@ -174,7 +178,8 @@ public sealed class OutboxDispatcher(
         }
     }
 
-    private async Task RecordAsync(
+    /// <summary>Grava o resultado da tentativa e devolve o próximo retry calculado (usado só em caso de falha).</summary>
+    private async Task<DateTime> RecordAsync(
         OutboxEvent outboxEvent, Guid claimToken, DeliveryAttempt attempt, OutboxOptions outbox, CancellationToken ct)
     {
         var now = Now();
@@ -223,9 +228,11 @@ public sealed class OutboxDispatcher(
                 "Webhook {EventId} ({EventType}) da tarefa {TaskId} falhou na tentativa {Attempt}: {Result} em {ElapsedMs} ms; próxima tentativa em {NextRetryAt:o}",
                 outboxEvent.EventId, outboxEvent.EventType, outboxEvent.TaskId, attempts, attempt.Error, attempt.ElapsedMs, nextRetryAt);
         }
+        return nextRetryAt;
     }
 
-    private async Task ReleaseAsync(List<Guid> eventIds, Guid claimToken, CancellationToken ct)
+    /// <summary>Devolve eventos reservados e não tentados, sem contar tentativa, elegíveis a partir de <paramref name="notBefore"/>.</summary>
+    private async Task ReleaseAsync(List<Guid> eventIds, Guid claimToken, DateTime notBefore, CancellationToken ct)
     {
         if (eventIds.Count == 0)
             return;
@@ -234,6 +241,7 @@ public sealed class OutboxDispatcher(
         await db.OutboxEvents
             .Where(e => eventIds.Contains(e.EventId) && e.ClaimToken == claimToken)
             .ExecuteUpdateAsync(s => s
+                .SetProperty(e => e.NextRetryAt, e => e.NextRetryAt > notBefore ? e.NextRetryAt : notBefore)
                 .SetProperty(e => e.LockedUntil, (DateTime?)null)
                 .SetProperty(e => e.ClaimToken, (Guid?)null), ct);
     }

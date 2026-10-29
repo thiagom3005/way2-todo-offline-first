@@ -166,7 +166,7 @@ describe('SyncStore', () => {
         ],
         nextCursor: 9,
         hasMore: false,
-      });
+      }, 0);
       const [mutation] = await mutations();
 
       await store.applyResult(applied(mutation, serverTask(task.id, 2, { title: 'Minha edição' })));
@@ -237,7 +237,7 @@ describe('SyncStore', () => {
         ],
         nextCursor: 3,
         hasMore: false,
-      });
+      }, 0);
 
       const local = await db.local_tasks.get(task.id);
       expect(local).toMatchObject({
@@ -258,11 +258,41 @@ describe('SyncStore', () => {
           changes: [{ revision: 1, action: 'upsert', task: serverTask(id, 1) }],
           nextCursor: 1,
           hasMore: false,
-        }),
+        }, 0),
       ).rejects.toThrow();
 
       expect(await db.local_tasks.get(id)).toBeUndefined();
       expect(await store.cursor()).toBe(0);
+    });
+
+    it('não desfaz o cursor rebaixado por um "Descartar" durante o pull', async () => {
+      const task = await syncedTask(2);
+      await store.applyPullPage({ changes: [], nextCursor: 4, hasMore: false }, 0);
+      await repo.update(task.id, fields({ title: 'Recusada' }));
+      await store.claimBatch(50);
+      const [mutation] = await mutations();
+      await store.applyResult({
+        operationId: mutation.operationId,
+        status: 'validation_error',
+        serverTask: null,
+        errors: { title: ['inválido'] },
+      });
+
+      const requested = await store.cursor(); // pull sai com o cursor 4...
+      const updatedAt = (await db.local_tasks.get(task.id))!.updatedAt;
+      await store.useServerVersion(task.id, mutation.operationId, updatedAt); // ...e o cursor volta a 0
+      const other = newUuid();
+      await store.applyPullPage(
+        {
+          changes: [{ revision: 5, action: 'upsert', task: serverTask(other, 1) }],
+          nextCursor: 5,
+          hasMore: false,
+        },
+        requested,
+      );
+
+      expect(await store.cursor()).toBe(0); // o próximo pull reobtém a tarefa descartada
+      expect(await db.local_tasks.get(other)).toMatchObject({ serverVersion: 1 });
     });
   });
 

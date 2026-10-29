@@ -30,7 +30,7 @@ sequenceDiagram
             W->>DB: attempts+1, last_error, next_retry_at (2s..5min ±20%)
         else timeout ou conexão recusada
             X--xW: sem resposta
-            W->>DB: attempts+1 e libera o resto do lote sem gastar tentativas
+            W->>DB: attempts+1; o resto do lote volta sem gastar tentativas e espera a mesma janela de retry
         end
     end
     Note over W,X: At-least-once; a ordem de chegada é garantida pela guarda de versão do consumidor

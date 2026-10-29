@@ -12,7 +12,7 @@
 // COMPOSE_PROJECT_NAME (para rodar contra um projeto compose isolado, com outras portas).
 // ATENÇÃO: executa `docker compose stop web api` e `docker compose start api web` durante o teste.
 import { execSync, spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -28,7 +28,6 @@ const BROWSER =
 const ORIGIN = process.env.WEB_ORIGIN ?? 'http://localhost:4280';
 const EMAIL = process.env.DEMO_EMAIL ?? 'demo2@way2.local';
 const PASSWORD = process.env.DEMO_PASSWORD;
-const PORT = 9333;
 // Títulos únicos por execução: o roteiro pode rodar várias vezes com o mesmo usuário.
 const RUN = new Date().toISOString().slice(11, 19);
 const T = {
@@ -49,7 +48,9 @@ const browser = spawn(
   BROWSER,
   [
     '--headless=new',
-    `--remote-debugging-port=${PORT}`,
+    // Porta 0: o navegador escolhe uma livre e a grava em DevToolsActivePort. Com porta fixa, um navegador
+    // que tenha sobrado de outra execução (com sessão e Service Worker antigos) seria usado no lugar deste.
+    '--remote-debugging-port=0',
     `--user-data-dir=${profile}`,
     '--no-first-run',
     '--no-default-browser-check',
@@ -126,9 +127,10 @@ async function addTask(title, category) {
 
 try {
   let version;
-  for (let i = 0; i < 40 && !version; i++) {
+  for (let i = 0; i < 80 && !version; i++) {
     try {
-      version = await (await fetch(`http://127.0.0.1:${PORT}/json/version`)).json();
+      const port = readFileSync(join(profile, 'DevToolsActivePort'), 'utf8').split('\n')[0];
+      version = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
     } catch {
       await sleep(250);
     }
@@ -250,10 +252,19 @@ try {
   try {
     compose('start api web');
   } catch {}
+  // Fecha pelo protocolo (encerra todos os processos do navegador); kill da árvore como garantia.
+  try {
+    await Promise.race([send('Browser.close', {}, null), sleep(3000)]);
+  } catch {}
   try {
     ws?.close();
   } catch {}
   browser.kill();
+  if (process.platform === 'win32') {
+    try {
+      execSync(`taskkill /PID ${browser.pid} /T /F`, { stdio: 'ignore' });
+    } catch {}
+  }
   await sleep(1000);
   try {
     rmSync(profile, { recursive: true, force: true });

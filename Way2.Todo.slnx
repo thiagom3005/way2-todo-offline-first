@@ -4,4 +4,7 @@
     <Project Path="src/backend/Way2.Todo.Api/Way2.Todo.Api.csproj" />
     <Project Path="src/backend/Way2.Todo.Tests/Way2.Todo.Tests.csproj" />
   </Folder>
+  <Folder Name="/src/consumer/">
+    <Project Path="src/consumer/Way2.Todo.Consumer/Way2.Todo.Consumer.csproj" />
+  </Folder>
 </Solution>

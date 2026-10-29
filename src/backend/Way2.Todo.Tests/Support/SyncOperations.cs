@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Options;
 using Way2.Todo.Api.Identity;
 using Way2.Todo.Api.Sync;
@@ -14,7 +15,7 @@ public static class SyncOperations
 
     /// <summary>Usuário novo com cliente autenticado: revisões e cursor começam do zero.</summary>
     public static async Task<(HttpClient Client, Guid UserId)> NewUserClientAsync(
-        this PostgresFixture fixture, ApiFactory? api = null)
+        this PostgresFixture fixture, WebApplicationFactory<Program>? api = null)
     {
         var user = await fixture.CreateUserAsync();
         var token = new JwtTokenIssuer(Options.Create(ApiFactory.Jwt), TimeProvider.System).Issue(user).AccessToken;

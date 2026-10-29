@@ -18,6 +18,9 @@ dist/
 .angular/
 coverage/
 
+# Log de eventos do consumidor simulado (execução local)
+src/consumer/**/data/
+
 # Ambiente local (nunca versionar segredos)
 .env
 *.local.json

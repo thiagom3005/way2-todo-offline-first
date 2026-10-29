@@ -22,6 +22,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Way2.Todo.Api\Way2.Todo.Api.csproj" />
+    <ProjectReference Include="..\..\consumer\Way2.Todo.Consumer\Way2.Todo.Consumer.csproj" />
   </ItemGroup>
 
 </Project>

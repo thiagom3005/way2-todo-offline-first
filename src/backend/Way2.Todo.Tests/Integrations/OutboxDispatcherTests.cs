@@ -51,22 +51,11 @@ public sealed class OutboxDispatcherTests(PostgresFixture fixture)
     /// <summary>Banco compartilhado: neutraliza pendências de outros testes antes de cada cenário.</summary>
     private async Task<(HttpClient Client, Guid UserId)> IsolatedUserAsync()
     {
-        await using (var db = fixture.CreateDbContext())
-        {
-            await db.OutboxEvents.Where(e => e.Status == OutboxStatuses.Pending)
-                .ExecuteUpdateAsync(s => s
-                    .SetProperty(e => e.Status, OutboxStatuses.Delivered)
-                    .SetProperty(e => e.DeliveredAt, DateTime.UtcNow));
-        }
+        await fixture.NeutralizePendingEventsAsync();
         return await fixture.NewUserClientAsync();
     }
 
-    private async Task<List<OutboxEvent>> EventsOfAsync(Guid userId)
-    {
-        await using var db = fixture.CreateDbContext();
-        return await db.OutboxEvents.AsNoTracking()
-            .Where(e => e.UserId == userId).OrderBy(e => e.ServerRevision).ToListAsync();
-    }
+    private Task<List<OutboxEvent>> EventsOfAsync(Guid userId) => fixture.OutboxEventsOfAsync(userId);
 
     /// <summary>
     /// Eventos recém-criados pelo push, com o relógio do dispatcher posto logo depois deles: o push usa o

@@ -34,8 +34,24 @@ services:
       DemoSeed__Users__0__Password: ${DEMO_PASSWORD:-Way2Demo!2026}
       DemoSeed__Users__1__Email: demo2@way2.local
       DemoSeed__Users__1__Password: ${DEMO_PASSWORD:-Way2Demo!2026}
+      # Webhooks da outbox. Sem depends_on no consumidor: a API funciona (e acumula eventos) com ele fora do ar.
+      Webhook__Url: http://consumer:8080/webhooks/todo-events
+      Webhook__Secret: ${WEBHOOK_SECRET:-dev-only-webhook-secret-do-not-use-in-production-0123456789}
     ports:
       - "${API_PORT:-5080}:8080"
+
+  # Consumidor externo simulado: recebe os webhooks, deduplica por eventId e mantém uma projeção somente
+  # leitura. Sem credenciais de banco nem token da API. Painel e falhas simuladas só em 127.0.0.1.
+  consumer:
+    build:
+      context: src/consumer/Way2.Todo.Consumer
+    environment:
+      Consumer__WebhookSecret: ${WEBHOOK_SECRET:-dev-only-webhook-secret-do-not-use-in-production-0123456789}
+      Consumer__DataPath: /data/events.jsonl
+    volumes:
+      - consumer-data:/data
+    ports:
+      - "127.0.0.1:${CONSUMER_PORT:-5090}:8080"
 
   # Build de produção do PWA (Service Worker ativo) com /api encaminhado para a API na mesma origem.
   # Dois "dispositivos" no mesmo navegador: http://localhost:4280 e http://127.0.0.1:4280.
@@ -49,3 +65,4 @@ services:
 
 volumes:
   pgdata:
+  consumer-data:

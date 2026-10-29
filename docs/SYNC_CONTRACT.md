@@ -2,7 +2,7 @@
 
 > O contrato usa HTTP/JSON, UUIDs e revisão monotônica **por usuário**.
 >
-> **Estado da implementação:** `POST /api/auth/login` e os [endpoints auxiliares](#endpoints-auxiliares-fase-a) estão implementados e testados (Fase A). `POST /api/sync/push`, `GET /api/sync/pull` e o webhook ainda são design (Fases B e C).
+> **Estado da implementação:** login e [endpoints auxiliares](#endpoints-auxiliares-fase-a) (Fase A), `POST /api/sync/push`, `GET /api/sync/pull`, o `SyncEngine` do cliente e a resolução de conflitos (Fase B) estão implementados e testados. A `integration_outbox` e o webhook (§6) ainda são design (Fase C). Decisões de implementação estão marcadas com **Implementado:**.
 
 ## Convenções
 
@@ -105,6 +105,14 @@ Significados:
 - `operationId`: UUID gerado quando uma intenção entra na fila. **Imutável nos retries**. Unicidade por usuário.
 - Limite proposto: 50 operações por lote. Processamento na ordem recebida, uma transação por operação. Um erro de negócio em uma operação não invalida as demais, mas tarefas com operações dependentes são enviadas sequencialmente pelo cliente.
 
+**Implementado:**
+
+- Lote com 0 ou mais de 50 operações, ou `deviceId` vazio → `400` (`ValidationProblem`). JSON malformado também → `400`.
+- O servidor despacha pela `action` antes de olhar `baseVersion`: `delete` sem `baseVersion` é `validation_error` e **nunca** vira criação.
+- `priority`, `status`, `dueDate` e `createdAt` são convertidos por operação: valor inválido gera `validation_error` só naquela operação (`errors` com as chaves `priority`, `dueDate`...), e as demais seguem.
+- **Identidade da operação:** `processed_operations.request_hash` guarda o SHA-256 da representação canônica (`taskId`, `action`, `baseVersion` e payload normalizado: campos após `trim`, enums em minúsculas, `dueDate` `YYYY-MM-DD`, `createdAt` UTC em ms). Um `operationId` já processado chegando com outro conteúdo (ou outra tarefa) recebe `validation_error` (`errors.operationId`) e nada é reaplicado. O mesmo conteúdo com espaços extras continua sendo `duplicate`.
+- O cliente envia **uma operação por tarefa por requisição** (a seguinte depende do ack, que rebaseia a `baseVersion`); tarefas diferentes vão no mesmo lote.
+
 Resposta `200`, mesmo quando há conflito em operação individual:
 
 ```json
@@ -178,6 +186,16 @@ Na **mesma transação PostgreSQL** por operação aceita:
 5. Inserir `task_change_log` e `integration_outbox`.
 6. Gravar `processed_operations` com resultado original e confirmar transação.
 
+**Implementado** (`Sync/SyncService.cs`), na ordem:
+
+1. `INSERT … ON CONFLICT DO NOTHING` e `SELECT … FOR UPDATE` em `user_sync_counters`, **antes** da checagem de duplicidade. Assim um retry concorrente do mesmo `operationId` (timeout seguido de reenvio enquanto o primeiro ainda roda) espera o lock e, ao seguir, enxerga a operação já gravada (Read Committed). Um único lock por transação, sempre o primeiro: sem deadlock.
+2. `processed_operations` por `(user_id, operation_id)`: mesmo `request_hash` → `duplicate` com o resultado original; outro conteúdo → `validation_error`.
+3. `TaskCommandService` (create/update/delete com `baseVersion`). Em `conflict`/`validation_error`, rollback: **nada** é gravado e nenhuma revisão é consumida; o retry reavalia e dá o mesmo resultado (versões só crescem e tombstones são permanentes).
+4. Em `applied`: `last_revision + 1`, `task_change_log` com o snapshot e `processed_operations` com `{serverRevision, serverTask}`, no mesmo commit da tarefa.
+5. A `integration_outbox` entra nesta mesma transação na Fase C.
+
+Falha transitória devolve `5xx` para o lote inteiro; o cliente reenvia, e o que já tinha sido commitado volta como `duplicate`. A migração `AddSyncTables` não gera change log para tarefas anteriores: não havia nenhuma, porque a Fase A não tinha endpoint de escrita.
+
 Unicidade no banco e tratamento de disputa de concorrência são necessários; não confiar apenas em checagens prévias em memória. Uma nova versão de tarefa produzida por operação bem-sucedida não implica que **todas as** cópias locais do cliente possam ser substituídas por esse snapshot (pode existir edição mais nova ainda pendente).
 
 ## 2. Buscar alterações confirmadas
@@ -237,6 +255,14 @@ Resposta `200`:
 - Se existe uma edição local pendente para `taskId`, **não sobrescrever a cópia de trabalho** com a mudança remota; registrar a versão remota para futura resolução.
 - Para a prova, o histórico é mantido sem expiração; uma solução de produção poderia adicionar snapshot inicial, retenção e política de reset de cursor.
 
+**Implementado:**
+
+- `limit`: padrão 100, máximo 500; `cursor < 0` ou `limit` fora do intervalo → `400`. O cliente pede páginas de 200.
+- Revisões de um usuário são atribuídas sob o lock do contador e confirmadas em ordem, então o pull nunca vê a revisão N sem as anteriores.
+- O cliente só faz pull quando não há operação `inflight` e aplica cada página e o cursor na **mesma** transação IndexedDB.
+- Tarefa com mutação local não tem a cópia de trabalho tocada: o snapshot remoto mais novo fica em `local_tasks.remoteSnapshot` e é usado no ack e na resolução de conflito.
+- Mudança com `version ≤ serverVersion` local é ignorada: o replay é seguro e não ressuscita tarefas excluídas.
+
 ## 3. Resolução de conflito pelo usuário
 
 Quando `push` retornar `conflict`, manter a operação original separada e abrir diálogo:
@@ -245,6 +271,22 @@ Quando `push` retornar `conflict`, manter a operação original separada e abrir
 - **Manter minha alteração:** gerar **novo** `operationId`; usar `baseVersion = serverTask.version`, `payload` igual ao snapshot local desejado (ou `delete`), e enfileirar para sincronizar. A decisão é explícita; nunca retry cego com nova baseVersion.
 - Se houve uma alteração remota *posterior* à resolução, nova tentativa pode retornar outro conflito; repetir o fluxo.
 - Em conflito com tombstone, explicar que a tarefa foi removida em outro dispositivo; recriação com novo `taskId` pode ser oferecida como opção em evolução futura.
+
+**Implementado** (`core/sync/sync-store.ts`, `features/tasks/conflict-panel.ts`):
+
+- A mutação recusada vira `status: 'conflict'` e bloqueia só a fila daquela tarefa; o painel mostra a cópia de trabalho atual × o servidor mais recente conhecido.
+- Edições feitas com o conflito aberto vão para a cópia de trabalho e seguem juntas em "Manter".
+- Cada decisão é uma transação IndexedDB e só vale para o conflito exibido: outro `operationId` dá `stale`, e cópia alterada depois de exibida dá `changed` (o usuário revisa de novo). A decisão nunca descarta mutação `inflight`.
+- Por motivo:
+
+| Motivo | "Usar versão do servidor" | "Manter minha alteração" |
+|---|---|---|
+| `version_mismatch`, `already_exists` (tarefa própria) | Aplica o servidor e descarta as intenções | Uma nova operação: novo `operationId`, `baseVersion` = versão do servidor, payload = cópia local (ou `delete`) |
+| `deleted` | "Aceitar exclusão" | "Recriar como nova tarefa": novo `taskId`; o original continua tombstone |
+| `not_found`, `already_exists` sem `serverTask` | Descarta a cópia local | "Recriar como nova tarefa" |
+| `validation_error` | Descarta a alteração | "Enviar novamente" (cópia atual, possivelmente corrigida, com novo `operationId`) |
+
+- Resolvido sem perguntar: exclusão local contra tarefa já excluída ou inexistente no servidor (as duas pontas querem a tarefa fora).
 
 ## 4. Cliente: máquina de estados
 
@@ -258,6 +300,18 @@ Quando `push` retornar `conflict`, manter a operação original separada e abrir
 
 O estado `online` do navegador **não** prova conectividade com o backend. O indicador deve representar o resultado real de tentativas HTTP.
 
+**Implementado** (`core/sync/sync.service.ts`):
+
+- **Classificação das falhas:**
+  - `GET /api/health` sem resposta, timeout, status 0, 502, 503 ou 504 → `offline`;
+  - 401 ou token local expirado → `auth_required` (sem requisições até novo login);
+  - outros erros → `error`.
+- **Prioridade dos estados:** `auth_required` > `conflict` > `offline` > `error` > `pending` > `synced`. `syncing` aparece durante uma execução com pendências.
+- **Disparos:** início, `online`, foco, `visibilitychange`, escrita local (debounce de 1s) e a cada 30s com a aba visível.
+- **Falhas:** backoff exponencial de 1s até 60s com jitter de ±20%.
+- **Uma execução por vez:** mutex na aba e Web Locks por usuário entre abas. Web Locks só existe em contexto seguro (HTTPS/localhost); sem ele vale só o mutex da aba, e acks repetidos continuam inofensivos.
+- **Só com o app aberto:** a sincronização não usa Background Sync.
+
 ## 5. Tratamento de edições durante o envio
 
 - Ciclo de vida de `local_mutations.status`: `pending` (nunca enviada; pode ser coalescida com edições seguintes da mesma tarefa) → `inflight` (selecionada para envio) → removida no ack. Uma mutação `inflight` **nunca volta** a `pending`, mesmo após timeout: retries reenviam exatamente a mesma operação.
@@ -266,6 +320,13 @@ O estado `online` do navegador **não** prova conectividade com o backend. O ind
 - Quando o primeiro ack chega, seu `serverTask.version` passa a ser a `baseVersion` do próximo intento; o ack não pode substituir os novos valores locais da UI.
 - Enviar o próximo intento em seguida. Caso servidor tenha mudado por outro dispositivo, resolver conflito.
 - Depois de timeout sem resposta, enviar a **mesma** operação in-flight com o **mesmo** ID.
+
+**Implementado:**
+
+- O congelamento `pending → inflight` acontece numa transação IndexedDB antes do POST, com `chromeTransactionDurability: 'strict'`. Isso reduz a janela em que uma queda do aparelho "desfaria" o congelamento, mas não é garantia absoluta: o suporte varia entre navegadores, e a recuperação continua apoiada em retries com o mesmo `operationId`, idempotência no servidor e conflitos explícitos.
+- O ack (remover a mutação, rebasear a próxima e atualizar `serverVersion` sem nunca regredir) é uma única transação. Se falhar, a mutação continua `inflight` e o retry recebe `duplicate`.
+- Reenvio de `inflight` muda só `retryCount`.
+- A sonda de saúde vem antes do congelamento: offline, as edições continuam coalescendo na mesma mutação `pending`.
 
 ## 6. Integração externa: webhook
 
@@ -308,7 +369,7 @@ O backend cria um evento de integração na Outbox durante o commit da tarefa. U
 
 Não fazem parte do fluxo de sincronização; existem para operação e demonstração.
 
-- `GET /api/health` (anônimo): `200 {"status":"healthy"}` quando o PostgreSQL responde; `503` caso contrário. Na Fase B também servirá de sondagem real de conectividade do `SyncEngine`.
+- `GET /api/health` (anônimo): `200 {"status":"healthy"}` quando o PostgreSQL responde; `503` caso contrário. É a sondagem real de conectividade do `SyncEngine` antes de cada execução.
 - `GET /api/tasks` (Bearer obrigatório): tarefas **ativas** do usuário do token (sem tombstones), no formato do snapshot acima, ordenadas por `createdAt`. É somente leitura: o cliente offline não o usa; toda escrita será feita via `POST /api/sync/push`, para existir um único caminho com idempotência, change log e outbox.
 
 ## 7. Cenários de teste de contrato

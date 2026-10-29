@@ -2,35 +2,50 @@ sequenceDiagram
     autonumber
     actor User as Usuário
     participant UI as Angular/Signals
-    participant IDB as IndexedDB
-    participant S as SyncEngine
+    participant IDB as IndexedDB (banco do usuário)
+    participant S as SyncService + SyncEngine
     participant API as .NET Sync API
     participant DB as PostgreSQL
-    User->>UI: Cria/edita tarefa offline
-    UI->>IDB: Grava tarefa e operação pendente em transação
-    IDB-->>UI: Confirmado
-    UI-->>User: Mostra tarefa e indicador pendente
-    Note over UI,API: Tarefa urgente sobe imediatamente, sem servidor
-    User->>UI: Reconecta / abre / retoma foco
-    UI->>S: Iniciar sincronização
-    S->>IDB: Carrega operações pendentes
-    loop Por tarefa e em ordem
-        S->>API: POST /api/sync/push (operationId, baseVersion)
-        API->>DB: Transação: versão + dedupe + change log + outbox
-        alt Versão compatível
-            DB-->>API: Commit
-            API-->>S: applied/duplicate e snapshot aceito
-            S->>IDB: Confirma operação sem perder edições mais novas
-        else Conflito
-            API-->>S: conflict e snapshot remoto
-            S->>IDB: Guarda ambas as versões
-            S-->>UI: Exibir decisão de conflito
+    User->>UI: Cria/edita/exclui tarefa (online ou offline)
+    UI->>IDB: Tarefa + mutação pending na MESMA transação
+    IDB-->>UI: liveQuery atualiza a lista
+    Note over UI,IDB: "urgente" é calculado no cliente: sobe na hora, sem servidor
+    UI->>S: requestSync (também: início, online, foco, visível, a cada 30s, backoff)
+    S->>S: Mutex da aba + Web Lock por usuário
+    S->>API: GET /api/health (sonda real; navigator.onLine não basta)
+    alt API inalcançável
+        S-->>UI: offline (pendências seguem coalescendo); retry 1s→60s
+    else API responde
+        loop Até 10 rodadas, uma operação por tarefa por rodada
+            S->>IDB: claim: cabeça da fila pending→inflight (congelada, durabilidade strict)
+            S->>API: POST /api/sync/push (operationId, baseVersion, payload)
+            loop Cada operação, transação própria
+                API->>DB: SELECT … FOR UPDATE em user_sync_counters
+                API->>DB: processed_operations (mesmo id + mesmo request_hash?)
+                alt Já processada
+                    API-->>S: duplicate + resultado original
+                else Nova
+                    API->>DB: baseVersion → tarefa, revisão, task_change_log, processed_operations
+                    API-->>S: applied (serverRevision, serverTask) ou conflict/validation_error (rollback)
+                end
+            end
+            alt applied/duplicate
+                S->>IDB: Remove a mutação, rebaseia a próxima da tarefa, nunca sobrescreve edição mais nova
+            else conflict
+                S->>IDB: Mutação vira conflict + linha em conflicts (fila da tarefa bloqueada)
+            end
         end
+        Note over S,API: Timeout/5xx: a mutação fica inflight e o retry reenvia o MESMO operationId
+        loop Enquanto hasMore (só sem inflight)
+            S->>API: GET /api/sync/pull?cursor=N
+            API->>DB: task_change_log do usuário, revision > N
+            API-->>S: changes, nextCursor, hasMore
+            S->>IDB: Aplica página + cursor numa transação (com mutação local: só guarda remoteSnapshot)
+        end
+        S-->>UI: synced, pending ou conflict
     end
-    S->>API: GET /api/sync/pull?cursor=N
-    API->>DB: Busca alterações confirmadas por usuário
-    DB-->>API: Página e nova revisão
-    API-->>S: changes, nextCursor, hasMore
-    S->>IDB: Aplica itens não dirty e avança cursor em transação
-    IDB-->>UI: Dados atualizados
-    UI-->>User: Sincronizado ou conflito pendente
+    opt Conflito
+        UI-->>User: Painel: sua versão × servidor
+        User->>UI: Usar servidor / Manter minha alteração
+        UI->>IDB: Transação: descarta intenções e aplica servidor, OU nova mutação (novo operationId, baseVersion = versão do servidor)
+    end

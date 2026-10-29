@@ -1,17 +1,18 @@
 flowchart TB
     U[Usuário em desktop ou celular] --> A[Angular PWA]
-    subgraph Client[Navegador]
-        A --> I[(IndexedDB: tarefas locais)]
-        A --> Q[(Outbox local: operações pendentes)]
-        SW[Service Worker: shell offline] --> A
-        SE[SyncEngine] --> I
+    subgraph Client[Navegador - uma origem = um dispositivo]
+        SW[Service Worker: shell offline HTML/JS/CSS] --> A
+        A --> I[(IndexedDB por usuário: local_tasks, conflicts, sync_metadata)]
+        A --> Q[(Outbox local: local_mutations pending/inflight/conflict)]
+        SE[SyncService + SyncEngine] --> I
         SE --> Q
     end
-    SE <-->|HTTPS REST push e pull| API[ASP.NET Core: monólito modular]
-    subgraph Backend[API e infraestrutura]
-        API --> T[Tasks + Sync + Identity]
-        T --> PG[(PostgreSQL: tasks, sync log, operações, outbox)]
-        W[BackgroundService] --> PG
+    A -->|mesma origem| WEB[nginx: build de produção + proxy /api]
+    SE <-->|REST push/pull com JWT| WEB
+    WEB --> API[ASP.NET Core: monólito modular]
+    subgraph Backend[API e infraestrutura - Docker Compose]
+        API --> T[Identity + Tasks + Sync]
+        T --> PG[(PostgreSQL: tasks, user_sync_counters, processed_operations, task_change_log)]
+        W[BackgroundService - Fase C] -.-> PG
     end
-    W -->|HTTP webhook at-least-once| EXT[Consumidor externo simulado]
-    EXT --> D[(Registro de eventos recebidos)]
+    W -.->|HTTP webhook at-least-once - Fase C| EXT[Consumidor externo simulado]

@@ -7,9 +7,9 @@ flowchart TB
         SE[SyncService + SyncEngine] --> I
         SE --> Q
     end
-    A -->|mesma origem| WEB[nginx: build de produção + proxy /api]
+    A -->|mesma origem| WEB[nginx: build de produção, CSP e proxy /api; sobrescreve X-Forwarded-For]
     SE <-->|REST push/pull com JWT| WEB
-    WEB --> API[ASP.NET Core: monólito modular]
+    WEB --> API[ASP.NET Core: monólito modular; confia só no IP fixo do nginx]
     subgraph Backend[API e infraestrutura - Docker Compose]
         API --> T[Identity + Tasks + Sync + Integrations]
         T --> PG[(PostgreSQL: tasks, user_sync_counters, processed_operations, task_change_log, integration_outbox)]

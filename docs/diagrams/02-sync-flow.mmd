@@ -10,6 +10,7 @@ sequenceDiagram
     UI->>IDB: Tarefa + mutação pending na MESMA transação
     IDB-->>UI: liveQuery atualiza a lista
     Note over UI,IDB: "urgente" é calculado no cliente: sobe na hora, sem servidor
+    Note over UI,IDB: Formulário de edição guarda a cópia exibida: se o conteúdo mudou por baixo (pull), a mutação usa essa versão e vira conflito
     UI->>S: requestSync (também: início, online, foco, visível, a cada 30s, backoff)
     S->>S: Mutex da aba + Web Lock por usuário
     S->>API: GET /api/health (sonda real; navigator.onLine não basta)
@@ -26,7 +27,7 @@ sequenceDiagram
                     API-->>S: duplicate + resultado original
                 else Nova
                     API->>DB: baseVersion → tarefa, revisão, task_change_log, processed_operations
-                    API-->>S: applied (serverRevision, serverTask) ou conflict/validation_error (rollback)
+                    API-->>S: applied (serverRevision, serverTask) ou conflict/validation_error (rollback só desta operação, inclusive erro de dados SQLSTATE 22)
                 end
             end
             alt applied/duplicate
@@ -40,7 +41,7 @@ sequenceDiagram
             S->>API: GET /api/sync/pull?cursor=N
             API->>DB: task_change_log do usuário, revision > N
             API-->>S: changes, nextCursor, hasMore
-            S->>IDB: Aplica página + cursor numa transação (com mutação local: só guarda remoteSnapshot)
+            S->>IDB: Aplica página + cursor numa transação (com mutação local: só guarda remoteSnapshot; cursor só avança se ainda for o da requisição)
         end
         S-->>UI: synced, pending ou conflict
     end

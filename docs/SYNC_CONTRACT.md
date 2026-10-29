@@ -46,9 +46,9 @@ Erros:
 
 - `400` (`ValidationProblem`): `email` ou `password` ausentes.
 - `401` (`ProblemDetails`, `title: "Credenciais inválidas."`): resposta **idêntica** para e-mail inexistente e senha errada (o custo de hash também é equalizado, para não permitir enumerar usuários).
-- `429`: limite de 20 tentativas por minuto por IP.
+- `429`: limite de 20 tentativas por minuto por IP do cliente. Atrás do nginx, o IP vem do `X-Forwarded-For` **somente** quando a conexão chega de um proxy listado em `ReverseProxy:KnownProxies` (no compose, o IP fixo do nginx, que sobrescreve o cabeçalho com `$remote_addr`); de qualquer outra origem o cabeçalho é ignorado.
 
-O JWT (HMAC-SHA256) carrega `sub` (UserId) e `email`; `expiresAt` é exatamente o `exp` do token. Não há refresh token: com o token expirado o cliente continua editando localmente e mostra `auth_required` até novo login.
+O JWT (HMAC-SHA256) carrega `sub` (UserId) e `email`; `expiresAt` é exatamente o `exp` do token. A validação aceita só `HS256` (`ValidAlgorithms`): um token com outro `alg` é recusado mesmo assinado com a chave certa. Não há refresh token: com o token vencido, ou recusado pelo servidor (401) antes do prazo local, o cliente continua editando localmente e mostra `auth_required` até novo login. "Entrar novamente" abre o login **sem** apagar a sessão: offline, as tarefas locais continuam acessíveis, e só um login bem-sucedido substitui a sessão.
 
 ## Modelo de tarefa (snapshot)
 
@@ -108,6 +108,9 @@ Significados:
 **Implementado:**
 
 - Lote com 0 ou mais de 50 operações, ou `deviceId` vazio → `400` (`ValidationProblem`). JSON malformado também → `400`.
+- Corpo acima de **1 MiB** → `413`. O maior lote válido fica abaixo de ~700 KB: 50 operações com 2.250 caracteres de texto cada, mesmo no pior caso de escape JSON.
+- Elemento `null` em `operations` → `validation_error` só nele (`operationId` vazio, `errors.operation`); as demais seguem.
+- Texto com o caractere nulo (U+0000), que o PostgreSQL não armazena, → `validation_error` (o cliente já o remove ao normalizar). Qualquer outro erro de dados do PostgreSQL (SQLSTATE classe 22) numa operação também vira `validation_error` **daquela** operação (`errors.payload`), com rollback completo dela: nenhuma tarefa, revisão, change log, `processed_operations` ou evento. As operações seguintes do lote são aplicadas normalmente.
 - O servidor despacha pela `action` antes de olhar `baseVersion`: `delete` sem `baseVersion` é `validation_error` e **nunca** vira criação.
 - `priority`, `status`, `dueDate` e `createdAt` são convertidos por operação: valor inválido gera `validation_error` só naquela operação (`errors` com as chaves `priority`, `dueDate`...), e as demais seguem.
 - **Identidade da operação:** `processed_operations.request_hash` guarda o SHA-256 da representação canônica (`taskId`, `action`, `baseVersion` e payload normalizado: campos após `trim`, enums em minúsculas, `dueDate` `YYYY-MM-DD`, `createdAt` UTC em ms). Um `operationId` já processado chegando com outro conteúdo (ou outra tarefa) recebe `validation_error` (`errors.operationId`) e nada é reaplicado. O mesmo conteúdo com espaços extras continua sendo `duplicate`.
@@ -194,7 +197,7 @@ Na **mesma transação PostgreSQL** por operação aceita:
 4. Em `applied`: `last_revision + 1`, `task_change_log` com o snapshot e `processed_operations` com `{serverRevision, serverTask}`, no mesmo commit da tarefa.
 5. A `integration_outbox` é gravada nesta mesma transação (Fase C, §6).
 
-Falha transitória devolve `5xx` para o lote inteiro; o cliente reenvia, e o que já tinha sido commitado volta como `duplicate`. A migração `AddSyncTables` não gera change log para tarefas anteriores: não havia nenhuma, porque a Fase A não tinha endpoint de escrita.
+Falha transitória devolve `5xx` para o lote inteiro; o cliente reenvia, e o que já tinha sido commitado volta como `duplicate`. Erro **determinístico** de dados (SQLSTATE 22) não é transitório: vira `validation_error` da operação, para não travar a fila com um lote que falharia para sempre. A migração `AddSyncTables` não gera change log para tarefas anteriores: não havia nenhuma, porque a Fase A não tinha endpoint de escrita.
 
 Unicidade no banco e tratamento de disputa de concorrência são necessários; não confiar apenas em checagens prévias em memória. Uma nova versão de tarefa produzida por operação bem-sucedida não implica que **todas as** cópias locais do cliente possam ser substituídas por esse snapshot (pode existir edição mais nova ainda pendente).
 
@@ -262,6 +265,7 @@ Resposta `200`:
 - O cliente só faz pull quando não há operação `inflight` e aplica cada página e o cursor na **mesma** transação IndexedDB.
 - Tarefa com mutação local não tem a cópia de trabalho tocada: o snapshot remoto mais novo fica em `local_tasks.remoteSnapshot` e é usado no ack e na resolução de conflito.
 - Mudança com `version ≤ serverVersion` local é ignorada: o replay é seguro e não ressuscita tarefas excluídas.
+- A página só avança o cursor se ele ainda for o usado na requisição: um "Descartar" (`validation_error` de tarefa que o servidor conhece) que o rebaixou para 0 durante o pull não é desfeito.
 
 ## 3. Resolução de conflito pelo usuário
 
@@ -276,6 +280,7 @@ Quando `push` retornar `conflict`, manter a operação original separada e abrir
 
 - A mutação recusada vira `status: 'conflict'` e bloqueia só a fila daquela tarefa; o painel mostra a cópia de trabalho atual × o servidor mais recente conhecido.
 - Edições feitas com o conflito aberto vão para a cópia de trabalho e seguem juntas em "Manter".
+- **Formulário aberto durante uma mudança remota:** a edição guarda a cópia exibida ao abrir. Se o conteúdo mudou por baixo (pull de outro dispositivo, outra aba), a nova mutação usa a versão de origem e o servidor responde `version_mismatch`, em vez de sobrescrever em silêncio. Se só a versão avançou (ack da própria edição), usa a versão atual, sem conflito falso. O `status` vem da cópia atual: um "concluir" feito com o formulário aberto não é desfeito.
 - Cada decisão é uma transação IndexedDB e só vale para o conflito exibido: outro `operationId` dá `stale`, e cópia alterada depois de exibida dá `changed` (o usuário revisa de novo). A decisão nunca descarta mutação `inflight`.
 - Por motivo:
 
@@ -286,7 +291,7 @@ Quando `push` retornar `conflict`, manter a operação original separada e abrir
 | `not_found`, `already_exists` sem `serverTask` | Descarta a cópia local | "Recriar como nova tarefa" |
 | `validation_error` | Descarta a alteração | "Enviar novamente" (cópia atual, possivelmente corrigida, com novo `operationId`) |
 
-- Resolvido sem perguntar: exclusão local contra tarefa já excluída ou inexistente no servidor (as duas pontas querem a tarefa fora).
+- Resolvido sem perguntar: exclusão local contra tarefa já excluída ou inexistente no servidor (as duas pontas querem a tarefa fora). O mesmo vale para "Manter" numa tarefa excluída aqui com o conflito aberto: nada é enfileirado e nada é recriado.
 
 ## 4. Cliente: máquina de estados
 
@@ -304,7 +309,7 @@ O estado `online` do navegador **não** prova conectividade com o backend. O ind
 
 - **Classificação das falhas:**
   - `GET /api/health` sem resposta, timeout, status 0, 502, 503 ou 504 → `offline`;
-  - 401 ou token local expirado → `auth_required` (sem requisições até novo login);
+  - 401 ou token local expirado → `auth_required` (sem requisições até novo login). O 401 marca o token como recusado em memória, então a tela de login abre mesmo com o token ainda no prazo local;
   - outros erros → `error`.
 - **Prioridade dos estados:** `auth_required` > `conflict` > `offline` > `error` > `pending` > `synced`. `syncing` aparece durante uma execução com pendências.
 - **Disparos:** início, `online`, foco, `visibilitychange`, escrita local (debounce de 1s) e a cada 30s com a aba visível.
@@ -388,7 +393,7 @@ O estado `online` do navegador **não** prova conectividade com o backend. O ind
 - `Content-Type: application/json`, `X-Way2-Event-Id` e `X-Way2-Event-Type`.
 - `X-Way2-Signature: t=<unix>,v1=<hex>`, com `v1 = HMAC-SHA256(segredo, "<t>." + corpo)` calculado sobre os **bytes exatos enviados**.
   - Timestamp e assinatura são **gerados de novo a cada tentativa**, mesmo depois de longa indisponibilidade; `eventId` e payload não mudam.
-  - O consumidor verifica sobre o corpo cru, antes de desserializar, compara em tempo constante e aceita `t` dentro de ±5 min. Caso contrário responde **401**, que a API registra como Error, por indicar configuração errada.
+  - O consumidor verifica sobre o corpo cru, antes de desserializar, compara em tempo constante e aceita `t` dentro de ±5 min (comparação com os limites da janela, sem subtração que estoure com `t` extremo). Caso contrário responde **401**, que a API registra como Error, por indicar configuração errada.
 - O segredo (`Webhook:Secret` / `Consumer:WebhookSecret`, mínimo de 32 bytes) vem só de configuração. No compose ele vem de `WEBHOOK_SECRET`, com padrão *dev-only*.
 
 ### Garantias de entrega
@@ -401,7 +406,7 @@ O estado `online` do navegador **não** prova conectividade com o backend. O ind
 | **Retry** | Backoff exponencial `2s × 2^(n-1)`, com expoente limitado, teto de 5 min e jitter de ±20%. Timeout de 10s por requisição. Redirects não são seguidos (3xx conta como falha). Toda resposta não-2xx é retentada; nada é descartado automaticamente. |
 | **Falhas persistidas** | `attempts`, `last_attempt_at`, `last_status_code`, `last_error` (só o tipo: `HTTP 503`, `Timeout`, `Falha de conexão (...)`, sem URL, corpo ou segredo) e `next_retry_at`. Log de Error na 10ª tentativa e a cada 10 seguintes. |
 | **Reinício** | Tudo está no PostgreSQL. A reserva (`locked_until` + `claim_token`, renovada antes de cada POST) expira e o próximo ciclo retoma. Resultado de reserva expirada é ignorado. `FOR UPDATE SKIP LOCKED` permite mais de uma instância da API. |
-| **Isolamento** | O dispatcher roda fora das requisições. Consumidor fora do ar não afeta push, pull nem `/api/health`. Timeout ou falha de conexão encerram o ciclo sem gastar tentativas dos outros eventos. Erro de banco num ciclo é logado e não derruba a API. |
+| **Isolamento** | O dispatcher roda fora das requisições. Consumidor fora do ar não afeta push, pull nem `/api/health`. Timeout ou falha de conexão encerram o ciclo: o resto do lote volta sem gastar tentativas e espera a mesma janela de retry do evento que falhou, então um consumidor fora do ar recebe uma tentativa por janela, não uma por evento. Erro de banco num ciclo é logado e não derruba a API. |
 | **Quase tempo real** | Um sinal pós-commit (canal de capacidade 1, que nunca lança) acorda o dispatcher na hora; há polling de 2s como reserva. Na demonstração, a entrega levou 393 ms depois do commit. |
 
 ### Acompanhamento
@@ -419,7 +424,7 @@ O estado `online` do navegador **não** prova conectividade com o backend. O ind
   1. verifica a assinatura;
   2. aplica a falha simulada, se houver;
   3. deduplica por `eventId`;
-  4. grava no log JSONL com fsync e **só então** atualiza o índice e a projeção (guarda de versão; `task.deleted` marca exclusão);
+  4. grava no log JSONL com fsync e **só então** atualiza o índice e a projeção (guarda de versão; `task.deleted` marca exclusão). Uma gravação que falha no meio (disco cheio) é truncada de volta ao início da linha: o log nunca fica com uma linha corrompida no meio, e o remetente recebe erro e reenvia;
   5. responde `200 {"eventId": "...", "duplicate": false|true}`.
 - Consulta: `GET /events` (eventos, entregas por `eventId`, totais e duplicatas), `GET /tasks` (projeção) e `GET /` (painel com atualização automática).
 - `PUT/DELETE /failure-mode` com `{ "statusCode": 503, "remaining": 2, "delayMs": 0, "afterProcessing": false }`:

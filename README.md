@@ -27,7 +27,7 @@ A arquitetura é um **monólito modular** (ASP.NET Core + PostgreSQL + Angular),
 | Uso offline real no celular após a primeira carga | PWA com Service Worker; dados no IndexedDB | `verify-pwa-offline`: containers **parados**, app recarregado pelo Service Worker, CRUD offline, sincronização automática na volta |
 | Sincronização automática e estado visível | `SyncEngine` com sonda real (`/api/health`), backoff, gatilhos; indicador com 7 estados | 19 cenários do engine + 11 do serviço; `navigator.onLine` nunca é prova de conexão |
 | Conflitos entre dispositivos sem perda | `baseVersion`, conflito explícito, painel "sua versão × servidor" | 17 testes de resolução + conflito real entre dois dispositivos no navegador |
-| Integração externa quase em tempo real, somente leitura | Outbox no mesmo commit, `OutboxDispatcher`, webhook HMAC, consumidor idempotente | Testes de outbox e dispatcher (500, timeout, 3xx/4xx, backoff, ordem estrita, concorrência, reinício), 9 do consumidor e 2 de ponta a ponta; 503, consumidor fora do ar e ack perdido validados com Docker |
+| Integração externa quase em tempo real, somente leitura | Outbox no mesmo commit, `OutboxDispatcher`, webhook HMAC, consumidor idempotente | Testes de outbox e dispatcher (500, timeout, 3xx/4xx, backoff, ordem estrita, concorrência, reinício), do consumidor (assinatura, dedupe, log) e 2 de ponta a ponta; 503, consumidor fora do ar e ack perdido validados com Docker |
 | Dimensionamento para ~1.000 usuários | API stateless, lock por usuário, índices por chave, paginação | Estimativa explícita na seção [Dimensionamento](#dimensionamento) (**não** é medição) |
 
 ## Tecnologias e por quê
@@ -115,7 +115,7 @@ Cada origem é um "dispositivo", com IndexedDB, sessão e Service Worker própri
 dotnet test Way2.Todo.slnx
 ```
 
-**93 testes** no backend: 30 unitários (domínio, JWT, backoff, consumidor em memória) e 63 de integração com PostgreSQL real via Testcontainers (exigem Docker em execução), incluindo 2 de ponta a ponta com a API real entregando ao consumidor real. Sem Docker, só os unitários:
+**99 testes** no backend: 36 unitários (domínio, JWT, backoff, janela da assinatura, consumidor em memória) e 63 de integração com PostgreSQL real via Testcontainers (exigem Docker em execução), incluindo 2 de ponta a ponta com a API real entregando ao consumidor real. Sem Docker, só os unitários:
 
 ```bash
 dotnet test Way2.Todo.slnx --filter "Category!=Integration"
@@ -139,7 +139,7 @@ DEMO_PASSWORD=Way2Demo!2026 node scripts/verify-pwa-offline.mjs
 
 O script confere se o Service Worker está ativo e controlando a página e então **para de verdade** os containers `web` e `api`. Em seguida recarrega, cria, edita, conclui e exclui offline, religa os containers e espera a sincronização automática. No fim, confere os cabeçalhos de segurança e falha se houver qualquer violação de CSP. Aceita `WEB_ORIGIN` e `COMPOSE_PROJECT_NAME`, para rodar contra um projeto compose isolado.
 
-**Última execução (29/10/2026), a partir de um clone limpo num projeto compose isolado:** backend 93/93, frontend 164/164, `npm audit` sem vulnerabilidades, build de produção sem avisos, `verify-pwa-offline` aprovado sem violações de CSP e webhook validado com falha e recuperação.
+**Última execução (29/10/2026):** backend 99/99 e frontend 164/164. A partir de um clone limpo, num projeto compose isolado: `npm audit` sem vulnerabilidades, build de produção sem avisos, `verify-pwa-offline` aprovado sem violações de CSP e webhook validado com falha e recuperação.
 
 ## Arquitetura
 

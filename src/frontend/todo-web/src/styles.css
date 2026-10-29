@@ -149,6 +149,11 @@ button:disabled {
 }
 
 .sync-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   margin-bottom: 12px;
   padding: 8px 12px;
   border-radius: 8px;
@@ -158,6 +163,20 @@ button:disabled {
 
 .sync-status.warn {
   background: var(--warn-bg);
+}
+
+.sync-status[data-state='synced'] {
+  background: #e8f5ec;
+}
+
+.sync-status button {
+  padding: 4px 10px;
+}
+
+.local.conflict {
+  background: var(--urgent-bg);
+  color: var(--urgent);
+  font-weight: 600;
 }
 
 .layout {

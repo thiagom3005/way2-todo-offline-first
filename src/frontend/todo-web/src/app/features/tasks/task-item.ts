@@ -39,8 +39,12 @@ const PRIORITY_LABELS = { low: 'Baixa', medium: 'Média', high: 'Alta' } as cons
             >
           }
           @if (task().syncState === 'pending') {
-            <span class="local" title="Salvo neste dispositivo; ainda não enviado ao servidor">
+            <span class="local" title="Salvo neste dispositivo; ainda não confirmado pelo servidor">
               não sincronizada
+            </span>
+          } @else if (task().syncState === 'conflict') {
+            <span class="local conflict" title="Alterada em outro dispositivo; escolha a versão">
+              conflito
             </span>
           }
         </p>

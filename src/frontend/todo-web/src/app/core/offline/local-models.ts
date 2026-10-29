@@ -17,9 +17,18 @@ export const DEFAULT_CATEGORY = 'Geral';
 
 /**
  * `pending`: há mutação local ainda não confirmada pelo servidor.
- * `synced`/`conflict` serão atribuídos pelo SyncEngine (Fase B).
+ * `synced`: cópia igual à última versão confirmada. `conflict`: aguarda decisão do usuário.
  */
 export type LocalSyncState = 'pending' | 'synced' | 'conflict';
+
+/** Snapshot de tarefa como o servidor a devolve (docs/SYNC_CONTRACT.md, "Modelo de tarefa"). */
+export interface ServerTask extends TaskFields {
+  id: string;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt: string | null;
+}
 
 /** Cópia de trabalho exibida pela UI (fonte de leitura, mesmo online). */
 export interface LocalTask extends TaskFields {
@@ -33,6 +42,11 @@ export interface LocalTask extends TaskFields {
   /** Última versão confirmada pelo servidor; `null` = servidor ainda não conhece a tarefa. */
   serverVersion: number | null;
   syncState: LocalSyncState;
+  /**
+   * Versão remota mais nova recebida no pull enquanto havia mutação local: não sobrescreve a cópia de
+   * trabalho, mas fica registrada para o ack e a resolução de conflito usarem o estado mais recente.
+   */
+  remoteSnapshot?: ServerTask;
 }
 
 export type MutationAction = 'upsert' | 'delete';
@@ -40,8 +54,9 @@ export type MutationAction = 'upsert' | 'delete';
 /**
  * `pending`: nunca enviada — pode ser coalescida.
  * `inflight`: já enviada (ou em envio) — `operationId` e `payload` congelados; nunca volta a `pending`.
+ * `conflict`: recusada pelo servidor; bloqueia a fila da tarefa até a decisão do usuário.
  */
-export type MutationStatus = 'pending' | 'inflight';
+export type MutationStatus = 'pending' | 'inflight' | 'conflict';
 
 export interface UpsertPayload extends TaskFields {
   createdAt: string;
@@ -63,16 +78,23 @@ export interface LocalMutation {
   retryCount: number;
 }
 
-/** Chave/valor do sincronizador (cursor de pull, último sucesso) — usado a partir da Fase B. */
+/** Chave/valor do sincronizador (cursor de pull, identificador do dispositivo). */
 export interface SyncMetadataEntry {
   key: string;
   value: unknown;
 }
 
-/** Conflito aguardando decisão do usuário — preenchido pelo SyncEngine na Fase B. */
+export type ConflictReason =
+  'version_mismatch' | 'deleted' | 'already_exists' | 'not_found' | 'validation_error';
+
+/** Operação recusada pelo servidor, aguardando decisão do usuário (uma por tarefa). */
 export interface LocalConflict {
   taskId: string;
+  /** Mutação `conflict` que originou o conflito; a resolução só vale para ela. */
   operationId: string;
-  serverTask: unknown;
+  reason: ConflictReason;
+  /** Estado do servidor no momento da recusa; `null` quando não existe ou não pertence ao usuário. */
+  serverTask: ServerTask | null;
+  errors: Record<string, string[]> | null;
   detectedAt: string;
 }

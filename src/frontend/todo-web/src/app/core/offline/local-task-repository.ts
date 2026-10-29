@@ -13,8 +13,8 @@ import { newUuid } from './uuid';
  * Escritas locais: cada alteração grava a cópia de trabalho (`local_tasks`) e a intenção pendente
  * (`local_mutations`) na MESMA transação IndexedDB — ou as duas persistem, ou nenhuma.
  *
- * Coalescência só atua em mutações `pending` (nunca enviadas). Mutações `inflight` jamais são
- * alteradas: novas edições viram novas mutações, cuja `baseVersion` o SyncEngine ajusta no ack (Fase B).
+ * Coalescência só atua em mutações `pending` (nunca enviadas). Mutações `inflight` e `conflict` jamais
+ * são alteradas aqui: novas edições viram novas mutações, cuja `baseVersion` o `SyncStore` ajusta no ack.
  */
 export class LocalTaskRepository {
   constructor(
@@ -28,8 +28,11 @@ export class LocalTaskRepository {
     return liveQuery(() => this.db.local_tasks.filter((t) => t.deletedAt === null).toArray());
   }
 
+  /** Mutações aguardando envio ou confirmação (as que estão em conflito são contadas à parte). */
   pendingMutationCount$(): Observable<number> {
-    return liveQuery(() => this.db.local_mutations.count());
+    return liveQuery(() =>
+      this.db.local_mutations.where('status').anyOf('pending', 'inflight').count(),
+    );
   }
 
   async create(fields: TaskFields): Promise<LocalTask> {
@@ -45,7 +48,7 @@ export class LocalTaskRepository {
     };
     await this.db.transaction('rw', this.db.local_tasks, this.db.local_mutations, async () => {
       await this.db.local_tasks.add(task);
-      await this.db.local_mutations.add(this.newMutation(task, 'upsert', now));
+      await this.db.local_mutations.add(buildMutation(task, 'upsert', now, this.newId));
     });
     return task;
   }
@@ -66,9 +69,11 @@ export class LocalTaskRepository {
         return; // exclusão idempotente
       }
       const mutations = await this.mutationsOf(taskId);
-      const hasInflight = mutations.some((m) => m.status === 'inflight');
+      // Mutação já enviada (inflight) ou recusada (conflict): o servidor pode conhecer a tarefa.
+      const serverMayKnow =
+        current.serverVersion !== null || mutations.some((m) => m.status !== 'pending');
 
-      if (current.serverVersion === null && !hasInflight) {
+      if (!serverMayKnow) {
         // O servidor nunca soube desta tarefa: criação + exclusão se anulam localmente.
         await this.db.local_mutations.bulkDelete(mutations.map((m) => m.seq!));
         await this.db.local_tasks.delete(taskId);
@@ -79,7 +84,7 @@ export class LocalTaskRepository {
         ...current,
         deletedAt: now,
         updatedAt: now,
-        syncState: 'pending',
+        syncState: nextSyncState(current),
       });
       const last = mutations.at(-1);
       if (last?.status === 'pending' && last.action === 'upsert') {
@@ -90,7 +95,7 @@ export class LocalTaskRepository {
           queuedAt: now,
         });
       } else {
-        await this.db.local_mutations.add(this.newMutation(current, 'delete', now));
+        await this.db.local_mutations.add(buildMutation(current, 'delete', now, this.newId));
       }
     });
   }
@@ -109,7 +114,7 @@ export class LocalTaskRepository {
         ...current,
         ...normalizeFields(next(current)),
         updatedAt: now,
-        syncState: 'pending',
+        syncState: nextSyncState(current),
       };
       await this.db.local_tasks.put(updated);
 
@@ -121,7 +126,7 @@ export class LocalTaskRepository {
           queuedAt: now,
         });
       } else {
-        await this.db.local_mutations.add(this.newMutation(updated, 'upsert', now));
+        await this.db.local_mutations.add(buildMutation(updated, 'upsert', now, this.newId));
       }
       return updated;
     });
@@ -131,26 +136,33 @@ export class LocalTaskRepository {
     return this.db.local_mutations.where('taskId').equals(taskId).sortBy('seq');
   }
 
-  private newMutation(
-    task: LocalTask,
-    action: LocalMutation['action'],
-    now: string,
-  ): LocalMutation {
-    return {
-      operationId: this.newId(),
-      taskId: task.id,
-      action,
-      baseVersion: task.serverVersion,
-      payload: action === 'upsert' ? toPayload(task) : null,
-      status: 'pending',
-      queuedAt: now,
-      retryCount: 0,
-    };
-  }
-
   private timestamp(): string {
     return this.now().toISOString();
   }
+}
+
+/** Conflito aberto continua visível até a decisão do usuário, mesmo com novas edições locais. */
+function nextSyncState(current: LocalTask): LocalTask['syncState'] {
+  return current.syncState === 'conflict' ? 'conflict' : 'pending';
+}
+
+/** Nova intenção `pending` com `operationId` próprio, baseada na versão de servidor conhecida. */
+export function buildMutation(
+  task: LocalTask,
+  action: LocalMutation['action'],
+  now: string,
+  newId: () => string,
+): LocalMutation {
+  return {
+    operationId: newId(),
+    taskId: task.id,
+    action,
+    baseVersion: task.serverVersion,
+    payload: action === 'upsert' ? toPayload(task) : null,
+    status: 'pending',
+    queuedAt: now,
+    retryCount: 0,
+  };
 }
 
 export function normalizeFields(fields: TaskFields): TaskFields {
@@ -169,7 +181,7 @@ export function normalizeFields(fields: TaskFields): TaskFields {
   };
 }
 
-function toPayload(task: LocalTask): UpsertPayload {
+export function toPayload(task: TaskFields & { createdAt: string }): UpsertPayload {
   return {
     title: task.title,
     description: task.description,

@@ -1,4 +1,4 @@
-import { Component, computed, effect, inject, signal } from '@angular/core';
+import { Component, computed, DestroyRef, effect, inject, signal } from '@angular/core';
 import { toSignal } from '@angular/core/rxjs-interop';
 import { Router } from '@angular/router';
 import { from } from 'rxjs';
@@ -6,6 +6,7 @@ import { AuthService } from '../../core/auth/auth.service';
 import { LocalDatabase } from '../../core/offline/local-database';
 import type { LocalTask, TaskFields } from '../../core/offline/local-models';
 import { LocalTaskRepository } from '../../core/offline/local-task-repository';
+import { SyncService } from '../../core/sync/sync.service';
 import { todayLocalIsoDate } from './local-date';
 import { TaskForm } from './task-form';
 import { TaskItem } from './task-item';
@@ -20,21 +21,17 @@ export class TasksPage {
   private readonly auth = inject(AuthService);
   private readonly router = inject(Router);
   private readonly localDatabase = inject(LocalDatabase);
+  protected readonly sync = inject(SyncService);
   // authGuard garante usuário previamente autenticado; o banco aberto é sempre o dele.
-  private readonly repository = new LocalTaskRepository(
-    this.localDatabase.forUser(this.auth.user()!.id),
-  );
+  private readonly db = this.localDatabase.forUser(this.auth.user()!.id);
+  private readonly repository = new LocalTaskRepository(this.db);
 
   protected readonly user = this.auth.user;
-  protected readonly sessionExpired = signal(this.auth.isTokenExpired());
   protected readonly today = signal(todayLocalIsoDate());
 
   /** A UI sempre lê do IndexedDB (liveQuery), inclusive online. */
   protected readonly tasks = toSignal(from(this.repository.activeTasks$()), {
     initialValue: [] as LocalTask[],
-  });
-  protected readonly pendingCount = toSignal(from(this.repository.pendingMutationCount$()), {
-    initialValue: 0,
   });
 
   protected readonly filters = signal<TaskFilters>(NO_FILTERS);
@@ -49,6 +46,9 @@ export class TasksPage {
   protected readonly categoryLabels = computed(() => this.categories().map((c) => c.label));
 
   constructor() {
+    this.sync.start(this.auth.user()!.id, this.db);
+    inject(DestroyRef).onDestroy(() => this.sync.stop());
+
     // Categoria filtrada que deixou de existir (última tarefa excluída ou movida) volta para
     // "todas"; senão o seletor exibiria "Todas as categorias" com a lista vazia por um filtro oculto.
     effect(() => {
@@ -87,7 +87,9 @@ export class TasksPage {
     this.filters.update((current) => ({ ...current, [key]: value as TaskFilters[K] }));
   }
 
+  /** Sai preservando tarefas e pendências locais (também usado para "Entrar novamente"). */
   protected logout(): void {
+    this.sync.stop();
     this.auth.logout();
     this.localDatabase.close();
     void this.router.navigateByUrl('/login');
@@ -97,6 +99,7 @@ export class TasksPage {
     this.error.set(null);
     try {
       await action();
+      this.sync.requestSync();
     } catch {
       this.error.set('Não foi possível salvar neste dispositivo. Tente novamente.');
     }

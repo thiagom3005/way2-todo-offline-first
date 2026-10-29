@@ -6,17 +6,60 @@
   <button type="button" (click)="logout()">Sair</button>
 </header>
 
-<p class="sync-status" [class.warn]="sessionExpired()" role="status" data-testid="sync-status">
-  @if (sessionExpired()) {
-    Sessão expirada: suas alterações continuam salvas neste dispositivo. Entre novamente para
-    sincronizar.
-  } @else if (pendingCount() > 0) {
-    {{ pendingCount() }} {{ pendingCount() === 1 ? 'alteração salva' : 'alterações salvas' }} apenas
-    neste dispositivo — a sincronização com o servidor ainda não foi implementada.
-  } @else {
-    Nenhuma alteração local pendente.
+@let pending = sync.pendingCount();
+@let pendingText = pending + (pending === 1 ? ' alteração salva' : ' alterações salvas');
+<div
+  class="sync-status"
+  [attr.data-state]="sync.status()"
+  [class.warn]="['offline', 'error', 'conflict', 'auth_required'].includes(sync.status())"
+  role="status"
+  data-testid="sync-status"
+>
+  @switch (sync.status()) {
+    @case ('syncing') {
+      <span>Sincronizando…</span>
+    }
+    @case ('synced') {
+      <span>
+        Tudo sincronizado.
+        @if (sync.lastSyncedAt(); as at) {
+          Última sincronização às {{ at.toLocaleTimeString('pt-BR', { timeStyle: 'short' }) }}.
+        }
+      </span>
+    }
+    @case ('pending') {
+      <span>{{ pendingText }} neste dispositivo, aguardando envio.</span>
+    }
+    @case ('offline') {
+      <span>
+        Sem conexão com o servidor.
+        @if (pending > 0) {
+          {{ pendingText }} neste dispositivo; a sincronização volta sozinha quando o servidor
+          responder.
+        } @else {
+          Nenhuma alteração pendente.
+        }
+      </span>
+      <button type="button" (click)="sync.syncNow()">Tentar agora</button>
+    }
+    @case ('error') {
+      <span>Falha ao sincronizar; nova tentativa automática em instantes.</span>
+      <button type="button" (click)="sync.syncNow()">Tentar agora</button>
+    }
+    @case ('conflict') {
+      <span>
+        {{ sync.conflictCount() }}
+        {{ sync.conflictCount() === 1 ? 'conflito precisa' : 'conflitos precisam' }} da sua decisão.
+      </span>
+    }
+    @case ('auth_required') {
+      <span>
+        Sessão expirada: {{ pendingText }} neste dispositivo. Entre novamente para sincronizar.
+      </span>
+      <button type="button" (click)="logout()">Entrar novamente</button>
+    }
   }
-</p>
+</div>
 
 @if (error()) {
   <p class="error" role="alert">{{ error() }}</p>

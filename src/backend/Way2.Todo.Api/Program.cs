@@ -3,6 +3,7 @@ using System.Text.Json.Serialization;
 using Microsoft.EntityFrameworkCore;
 using Way2.Todo.Api.Identity;
 using Way2.Todo.Api.Infrastructure;
+using Way2.Todo.Api.Integrations;
 using Way2.Todo.Api.Sync;
 using Way2.Todo.Api.Tasks;
 
@@ -20,6 +21,7 @@ builder.Services.ConfigureHttpJsonOptions(json =>
 builder.Services.AddIdentityModule();
 builder.Services.AddScoped<TaskCommandService>();
 builder.Services.AddScoped<SyncService>();
+builder.Services.AddSingleton<OutboxSignal>();
 
 var app = builder.Build();
 
@@ -36,6 +38,7 @@ app.MapGet("/api/health", async (TodoDbContext db, CancellationToken ct) =>
 app.MapIdentityEndpoints();
 app.MapTaskEndpoints();
 app.MapSyncEndpoints();
+app.MapIntegrationEndpoints();
 
 if (app.Configuration.GetValue<bool>("Database:ApplyMigrationsOnStartup"))
 {

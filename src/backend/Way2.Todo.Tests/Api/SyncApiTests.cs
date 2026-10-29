@@ -1,13 +1,11 @@
 using System.Net;
-using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Options;
-using Way2.Todo.Api.Identity;
 using Way2.Todo.Api.Sync;
 using Way2.Todo.Api.Tasks;
 using Way2.Todo.Tests.Support;
+using static Way2.Todo.Tests.Support.SyncOperations;
 
 namespace Way2.Todo.Tests.Api;
 
@@ -15,64 +13,6 @@ namespace Way2.Todo.Tests.Api;
 [Trait("Category", "Integration")]
 public sealed class SyncApiTests(PostgresFixture fixture)
 {
-    private static readonly Guid DeviceId = Guid.NewGuid();
-
-    /// <summary>Usuário novo por teste: revisões e cursor começam do zero.</summary>
-    private async Task<(HttpClient Client, Guid UserId)> NewUserAsync()
-    {
-        var user = await fixture.CreateUserAsync();
-        var token = new JwtTokenIssuer(Options.Create(ApiFactory.Jwt), TimeProvider.System).Issue(user).AccessToken;
-        var client = fixture.Api.CreateClient();
-        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
-        return (client, user.Id);
-    }
-
-    private static Dictionary<string, object?> Upsert(
-        Guid taskId, int? baseVersion, string title = "Conferir medição", Guid? operationId = null,
-        string priority = "medium", string? dueDate = "2026-10-30") => new()
-    {
-        ["operationId"] = operationId ?? Guid.NewGuid(),
-        ["taskId"] = taskId,
-        ["action"] = "upsert",
-        ["baseVersion"] = baseVersion,
-        ["payload"] = new Dictionary<string, object?>
-        {
-            ["title"] = title,
-            ["description"] = null,
-            ["dueDate"] = dueDate,
-            ["priority"] = priority,
-            ["status"] = "pending",
-            ["category"] = "Campo",
-            ["createdAt"] = "2026-10-28T12:02:00.000Z",
-        },
-    };
-
-    private static Dictionary<string, object?> Delete(Guid taskId, int? baseVersion, Guid? operationId = null) => new()
-    {
-        ["operationId"] = operationId ?? Guid.NewGuid(),
-        ["taskId"] = taskId,
-        ["action"] = "delete",
-        ["baseVersion"] = baseVersion,
-        ["payload"] = null,
-    };
-
-    private static async Task<PushResult[]> PushAsync(HttpClient client, params object[] operations)
-    {
-        var response = await client.PostAsJsonAsync("/api/sync/push", new { deviceId = DeviceId, operations });
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        return [.. (await response.Content.ReadFromJsonAsync<PushResponse>(SyncJson.Options))!.Results];
-    }
-
-    private static async Task<PushResult> PushOneAsync(HttpClient client, object operation) =>
-        Assert.Single(await PushAsync(client, operation));
-
-    private static async Task<PullResponse> PullAsync(HttpClient client, long cursor, int limit = 100)
-    {
-        var response = await client.GetAsync($"/api/sync/pull?cursor={cursor}&limit={limit}");
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        return (await response.Content.ReadFromJsonAsync<PullResponse>(SyncJson.Options))!;
-    }
-
     /// <summary>Confere no banco quantas operações foram processadas e quais revisões existem no change log.</summary>
     private async Task AssertServerStateAsync(Guid userId, int processed, params long[] revisions)
     {
@@ -92,7 +32,7 @@ public sealed class SyncApiTests(PostgresFixture fixture)
     [Fact]
     public async Task Create_update_and_delete_are_applied_with_contiguous_revisions()
     {
-        var (client, _) = await NewUserAsync();
+        var (client, _) = await fixture.NewUserClientAsync();
         var taskId = Guid.NewGuid();
 
         var created = await PushOneAsync(client, Upsert(taskId, null));
@@ -115,7 +55,7 @@ public sealed class SyncApiTests(PostgresFixture fixture)
     [Fact]
     public async Task Retrying_an_operation_returns_the_original_result_without_reapplying()
     {
-        var (client, userId) = await NewUserAsync();
+        var (client, userId) = await fixture.NewUserClientAsync();
         var taskId = Guid.NewGuid();
         var create = Upsert(taskId, null);
 
@@ -135,7 +75,7 @@ public sealed class SyncApiTests(PostgresFixture fixture)
     [Fact]
     public async Task Reusing_an_operation_id_with_different_content_is_rejected()
     {
-        var (client, userId) = await NewUserAsync();
+        var (client, userId) = await fixture.NewUserClientAsync();
         var taskId = Guid.NewGuid();
         var operationId = Guid.NewGuid();
         var original = await PushOneAsync(client, Upsert(taskId, null, "Original", operationId));
@@ -165,7 +105,7 @@ public sealed class SyncApiTests(PostgresFixture fixture)
     [Fact]
     public async Task Concurrent_retries_of_the_same_operation_apply_once()
     {
-        var (client, userId) = await NewUserAsync();
+        var (client, userId) = await fixture.NewUserClientAsync();
         var create = Upsert(Guid.NewGuid(), null);
 
         var results = await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => PushOneAsync(client, create)));
@@ -179,7 +119,7 @@ public sealed class SyncApiTests(PostgresFixture fixture)
     [Fact]
     public async Task Two_devices_updating_the_same_version_conflict_without_overwriting()
     {
-        var (client, userId) = await NewUserAsync();
+        var (client, userId) = await fixture.NewUserClientAsync();
         var taskId = Guid.NewGuid();
         await PushOneAsync(client, Upsert(taskId, null));
 
@@ -207,7 +147,7 @@ public sealed class SyncApiTests(PostgresFixture fixture)
     [Fact]
     public async Task Operations_on_a_tombstone_return_deleted()
     {
-        var (client, _) = await NewUserAsync();
+        var (client, _) = await fixture.NewUserClientAsync();
         var taskId = Guid.NewGuid();
         await PushOneAsync(client, Upsert(taskId, null));
         await PushOneAsync(client, Delete(taskId, 1));
@@ -225,7 +165,7 @@ public sealed class SyncApiTests(PostgresFixture fixture)
     [Fact]
     public async Task Delete_without_base_version_is_rejected_and_never_creates()
     {
-        var (client, userId) = await NewUserAsync();
+        var (client, userId) = await fixture.NewUserClientAsync();
         var taskId = Guid.NewGuid();
 
         var result = await PushOneAsync(client, Delete(taskId, null));
@@ -240,7 +180,7 @@ public sealed class SyncApiTests(PostgresFixture fixture)
     [Fact]
     public async Task An_invalid_operation_does_not_block_the_rest_of_the_batch()
     {
-        var (client, _) = await NewUserAsync();
+        var (client, _) = await fixture.NewUserClientAsync();
 
         var results = await PushAsync(client,
             Upsert(Guid.NewGuid(), null, priority: "urgent"),
@@ -260,8 +200,8 @@ public sealed class SyncApiTests(PostgresFixture fixture)
     [Fact]
     public async Task Users_cannot_read_or_change_each_other_tasks()
     {
-        var (alice, aliceId) = await NewUserAsync();
-        var (bob, _) = await NewUserAsync();
+        var (alice, aliceId) = await fixture.NewUserClientAsync();
+        var (bob, _) = await fixture.NewUserClientAsync();
         var taskId = Guid.NewGuid();
         await PushOneAsync(alice, Upsert(taskId, null, "Tarefa da Alice"));
 
@@ -281,8 +221,8 @@ public sealed class SyncApiTests(PostgresFixture fixture)
     [Fact]
     public async Task Concurrent_creates_of_the_same_task_id_by_two_users_keep_one_owner()
     {
-        var (alice, _) = await NewUserAsync();
-        var (bob, _) = await NewUserAsync();
+        var (alice, _) = await fixture.NewUserClientAsync();
+        var (bob, _) = await fixture.NewUserClientAsync();
 
         for (var i = 0; i < 5; i++)
         {
@@ -300,7 +240,7 @@ public sealed class SyncApiTests(PostgresFixture fixture)
     [Fact]
     public async Task Parallel_pushes_produce_unique_contiguous_revisions()
     {
-        var (client, userId) = await NewUserAsync();
+        var (client, userId) = await fixture.NewUserClientAsync();
 
         var results = await Task.WhenAll(
             Enumerable.Range(0, 20).Select(i => PushOneAsync(client, Upsert(Guid.NewGuid(), null, $"Tarefa {i}"))));
@@ -314,7 +254,7 @@ public sealed class SyncApiTests(PostgresFixture fixture)
     [Fact]
     public async Task Pull_pages_through_all_changes_without_loss_or_repetition()
     {
-        var (client, _) = await NewUserAsync();
+        var (client, _) = await fixture.NewUserClientAsync();
         await PushAsync(client, [.. Enumerable.Range(0, 7).Select(i => (object)Upsert(Guid.NewGuid(), null, $"Tarefa {i}"))]);
 
         var page1 = await PullAsync(client, 0, limit: 3);
@@ -331,7 +271,7 @@ public sealed class SyncApiTests(PostgresFixture fixture)
     [Fact]
     public async Task Pull_concurrent_with_pushes_never_skips_a_revision()
     {
-        var (client, _) = await NewUserAsync();
+        var (client, _) = await fixture.NewUserClientAsync();
         const int total = 30;
 
         var writers = Task.WhenAll(Enumerable.Range(0, 3).Select(async writer =>
@@ -370,7 +310,7 @@ public sealed class SyncApiTests(PostgresFixture fixture)
     [Fact]
     public async Task Batch_and_pull_parameters_are_validated()
     {
-        var (client, _) = await NewUserAsync();
+        var (client, _) = await fixture.NewUserClientAsync();
         var tooMany = Enumerable.Range(0, 51).Select(_ => Upsert(Guid.NewGuid(), null)).ToArray();
 
         var badRequests = new[]
@@ -389,8 +329,8 @@ public sealed class SyncApiTests(PostgresFixture fixture)
     [Fact]
     public async Task Push_and_pull_json_follow_the_contract()
     {
-        var (client, _) = await NewUserAsync();
-        var (other, _) = await NewUserAsync();
+        var (client, _) = await fixture.NewUserClientAsync();
+        var (other, _) = await fixture.NewUserClientAsync();
         var taskId = Guid.NewGuid();
 
         var applied = await RawPushAsync(client, Upsert(taskId, null));

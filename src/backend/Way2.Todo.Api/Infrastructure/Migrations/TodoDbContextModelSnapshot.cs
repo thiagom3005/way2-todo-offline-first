@@ -54,6 +54,108 @@ namespace Way2.Todo.Api.Infrastructure.Migrations
                     b.ToTable("users", (string)null);
                 });
 
+            modelBuilder.Entity("Way2.Todo.Api.Integrations.OutboxEvent", b =>
+                {
+                    b.Property<Guid>("EventId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("event_id");
+
+                    b.Property<int>("Attempts")
+                        .HasColumnType("integer")
+                        .HasColumnName("attempts");
+
+                    b.Property<Guid?>("ClaimToken")
+                        .HasColumnType("uuid")
+                        .HasColumnName("claim_token");
+
+                    b.Property<DateTime?>("DeliveredAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("delivered_at");
+
+                    b.Property<string>("EventType")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("event_type");
+
+                    b.Property<DateTime?>("LastAttemptAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("last_attempt_at");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(300)
+                        .HasColumnType("character varying(300)")
+                        .HasColumnName("last_error");
+
+                    b.Property<int?>("LastStatusCode")
+                        .HasColumnType("integer")
+                        .HasColumnName("last_status_code");
+
+                    b.Property<DateTime?>("LockedUntil")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("locked_until");
+
+                    b.Property<DateTime>("NextRetryAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("next_retry_at");
+
+                    b.Property<DateTime>("OccurredAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("occurred_at");
+
+                    b.Property<string>("PayloadJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("payload_json");
+
+                    b.Property<int>("SchemaVersion")
+                        .HasColumnType("integer")
+                        .HasColumnName("schema_version");
+
+                    b.Property<long>("ServerRevision")
+                        .HasColumnType("bigint")
+                        .HasColumnName("server_revision");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("status");
+
+                    b.Property<Guid>("TaskId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("task_id");
+
+                    b.Property<int>("TaskVersion")
+                        .HasColumnType("integer")
+                        .HasColumnName("task_version");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("user_id");
+
+                    b.HasKey("EventId")
+                        .HasName("pk_integration_outbox");
+
+                    b.HasIndex("Status", "NextRetryAt")
+                        .HasDatabaseName("ix_integration_outbox_status_next_retry_at");
+
+                    b.HasIndex("TaskId", "ServerRevision")
+                        .HasDatabaseName("ix_integration_outbox_task_id_server_revision")
+                        .HasFilter("status = 'pending'");
+
+                    b.HasIndex("UserId", "ServerRevision")
+                        .IsUnique()
+                        .HasDatabaseName("ix_integration_outbox_user_id_server_revision");
+
+                    b.ToTable("integration_outbox", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_integration_outbox_event_type", "event_type IN ('task.created', 'task.updated', 'task.deleted')");
+
+                            t.HasCheckConstraint("ck_integration_outbox_status", "status IN ('pending', 'delivered')");
+                        });
+                });
+
             modelBuilder.Entity("Way2.Todo.Api.Sync.ProcessedOperation", b =>
                 {
                     b.Property<Guid>("UserId")
@@ -221,6 +323,16 @@ namespace Way2.Todo.Api.Infrastructure.Migrations
 
                             t.HasCheckConstraint("ck_tasks_version", "version >= 1");
                         });
+                });
+
+            modelBuilder.Entity("Way2.Todo.Api.Integrations.OutboxEvent", b =>
+                {
+                    b.HasOne("Way2.Todo.Api.Identity.User", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_integration_outbox_users_user_id");
                 });
 
             modelBuilder.Entity("Way2.Todo.Api.Sync.ProcessedOperation", b =>

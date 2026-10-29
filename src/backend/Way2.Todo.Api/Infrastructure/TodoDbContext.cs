@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Way2.Todo.Api.Identity;
+using Way2.Todo.Api.Integrations;
 using Way2.Todo.Api.Sync;
 using Way2.Todo.Api.Tasks;
 
@@ -13,6 +14,7 @@ public sealed class TodoDbContext(DbContextOptions<TodoDbContext> options) : DbC
     public DbSet<UserSyncCounter> SyncCounters => Set<UserSyncCounter>();
     public DbSet<ProcessedOperation> ProcessedOperations => Set<ProcessedOperation>();
     public DbSet<TaskChangeLogEntry> TaskChangeLog => Set<TaskChangeLogEntry>();
+    public DbSet<OutboxEvent> OutboxEvents => Set<OutboxEvent>();
 
     /// <summary>Configuração única usada pela API, pelas migrations e pelos testes.</summary>
     public static void Configure(DbContextOptionsBuilder options, string connectionString) =>
@@ -81,6 +83,30 @@ public sealed class TodoDbContext(DbContextOptions<TodoDbContext> options) : DbC
             change.Property(c => c.ChangeType).HasMaxLength(16);
             change.Property(c => c.SnapshotJson).HasColumnType("jsonb");
             change.HasOne<User>().WithMany().HasForeignKey(c => c.UserId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        model.Entity<OutboxEvent>(outbox =>
+        {
+            outbox.ToTable("integration_outbox", t =>
+            {
+                t.HasCheckConstraint(
+                    "ck_integration_outbox_event_type",
+                    "event_type IN ('task.created', 'task.updated', 'task.deleted')");
+                t.HasCheckConstraint("ck_integration_outbox_status", "status IN ('pending', 'delivered')");
+            });
+            outbox.HasKey(e => e.EventId);
+            outbox.Property(e => e.EventId).ValueGeneratedNever();
+            outbox.Property(e => e.EventType).HasMaxLength(32);
+            outbox.Property(e => e.Status).HasMaxLength(16);
+            outbox.Property(e => e.PayloadJson).HasColumnType("jsonb");
+            outbox.Property(e => e.LastError).HasMaxLength(300);
+            outbox.HasOne<User>().WithMany().HasForeignKey(e => e.UserId).OnDelete(DeleteBehavior.Restrict);
+
+            // Um evento por mudança aplicada (a revisão é única por usuário).
+            outbox.HasIndex(e => new { e.UserId, e.ServerRevision }).IsUnique();
+            // Varredura do dispatcher e checagem "há evento anterior pendente desta tarefa?".
+            outbox.HasIndex(e => new { e.Status, e.NextRetryAt });
+            outbox.HasIndex(e => new { e.TaskId, e.ServerRevision }).HasFilter("status = 'pending'");
         });
     }
 

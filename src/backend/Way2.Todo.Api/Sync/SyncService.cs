@@ -1,17 +1,22 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Way2.Todo.Api.Infrastructure;
+using Way2.Todo.Api.Integrations;
 using Way2.Todo.Api.Tasks;
 
 namespace Way2.Todo.Api.Sync;
 
 /// <summary>
 /// Push e pull do contrato de sincronização. Cada operação aceita grava, numa única transação PostgreSQL,
-/// a tarefa (via <see cref="TaskCommandService"/>), a revisão do usuário, o change log e
-/// <c>processed_operations</c>. A Fase C acrescenta <c>integration_outbox</c> nesta mesma transação.
+/// a tarefa (via <see cref="TaskCommandService"/>), a revisão do usuário, o change log,
+/// <c>processed_operations</c> e o evento da <c>integration_outbox</c>.
 /// </summary>
 public sealed class SyncService(
-    TodoDbContext db, TaskCommandService tasks, TimeProvider clock, ILogger<SyncService> logger)
+    TodoDbContext db,
+    TaskCommandService tasks,
+    OutboxSignal outboxSignal,
+    TimeProvider clock,
+    ILogger<SyncService> logger)
 {
     private static readonly Dictionary<string, string[]> ReusedOperationId = new()
     {
@@ -94,7 +99,7 @@ public sealed class SyncService(
             };
         }
 
-        // 4) Revisão, change log e operação processada no mesmo commit da tarefa.
+        // 4) Revisão, change log, operação processada e evento no mesmo commit da tarefa.
         var now = clock.GetUtcNow().UtcDateTime;
         var stored = new StoredOperationResult(counter.Advance(), applied.Task);
         db.TaskChangeLog.Add(new TaskChangeLogEntry
@@ -115,10 +120,21 @@ public sealed class SyncService(
             ResultJson = JsonSerializer.Serialize(stored, SyncJson.Options),
             ProcessedAt = now,
         });
+        // 5) Transactional Outbox: o evento de integração só existe se a mudança for confirmada.
+        db.OutboxEvents.Add(OutboxEvents.ForAppliedChange(
+            userId, stored.ServerRevision, applied.Task, EventTypeOf(operation), now));
         await db.SaveChangesAsync(ct);
         await transaction.CommitAsync(ct);
+        outboxSignal.Notify();
         return PushResult.Applied(operation.OperationId, stored);
     }
+
+    private static string EventTypeOf(ParsedOperation operation) => operation switch
+    {
+        { Action: SyncActions.Delete } => TaskEventTypes.Deleted,
+        { IsCreate: true } => TaskEventTypes.Created,
+        _ => TaskEventTypes.Updated,
+    };
 
     private Task<TaskCommandResult> ExecuteAsync(Guid userId, ParsedOperation operation, CancellationToken ct) =>
         operation switch

@@ -126,8 +126,10 @@ public sealed class WebhookConsumerTests : IAsyncLifetime
         {
             await DeliverAsync(client, eventId, body, sentBody: body.Replace("Tarefa", "Adulterada")),
             await DeliverAsync(client, eventId, body, secret: "another-secret-that-is-at-least-32-bytes"),
-            await DeliverAsync(client, eventId, body, timestamp: now - 301),
-            await DeliverAsync(client, eventId, body, timestamp: now + 301),
+            // Margem folgada: o relógio do consumidor anda durante o teste, e "now + 301" vira 300 (válido) se
+            // um segundo virar no meio. As bordas exatas estão em ConsumerSignatureWindowTests, com relógio fixo.
+            await DeliverAsync(client, eventId, body, timestamp: now - 330),
+            await DeliverAsync(client, eventId, body, timestamp: now + 330),
             // "now - t" daria exatamente long.MinValue: antes estourava em Math.Abs e virava 500.
             await DeliverAsync(client, eventId, body, timestamp: now + long.MinValue),
             await DeliverAsync(client, eventId, body, timestamp: long.MaxValue),
@@ -262,6 +264,35 @@ public sealed class WebhookConsumerTests : IAsyncLifetime
         File.WriteAllText(DataPath, "isto não é json\n{\"kind\":\"duplicate\"}\n");
 
         Assert.ThrowsAny<Exception>(() => Start());
+    }
+}
+
+/// <summary>Janela de ±5 min da assinatura no consumidor, com relógio fixo (bordas exatas, sem depender do tempo real).</summary>
+public sealed class ConsumerSignatureWindowTests
+{
+    private const string Secret = "test-only-webhook-secret-with-32-bytes!!";
+    private static readonly byte[] Body = Encoding.UTF8.GetBytes("{\"schemaVersion\":1}");
+    private static readonly DateTimeOffset Now = DateTimeOffset.FromUnixTimeSeconds(1_800_000_000);
+
+    private static bool Accepts(long timestamp) =>
+        WebhookSignature.IsValid(ApiSignature.Create(Secret, timestamp, Body), Body, Secret, Now, toleranceSeconds: 300);
+
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(-300, true)]
+    [InlineData(300, true)]
+    [InlineData(-301, false)]
+    [InlineData(301, false)]
+    public void Accepts_timestamps_up_to_five_minutes_in_either_direction(long offset, bool accepted) =>
+        Assert.Equal(accepted, Accepts(Now.ToUnixTimeSeconds() + offset));
+
+    [Fact]
+    public void Extreme_timestamps_are_rejected_without_overflow()
+    {
+        // "now - t" daria exatamente long.MinValue, e Math.Abs(long.MinValue) lança OverflowException.
+        Assert.False(Accepts(unchecked(Now.ToUnixTimeSeconds() + long.MinValue)));
+        Assert.False(Accepts(long.MinValue));
+        Assert.False(Accepts(long.MaxValue));
     }
 }
 

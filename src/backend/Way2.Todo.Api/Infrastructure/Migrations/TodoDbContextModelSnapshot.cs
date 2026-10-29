@@ -17,7 +17,7 @@ namespace Way2.Todo.Api.Infrastructure.Migrations
         {
 #pragma warning disable 612, 618
             modelBuilder
-                .HasAnnotation("ProductVersion", "10.0.14")
+                .HasAnnotation("ProductVersion", "10.0.4")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
@@ -52,6 +52,96 @@ namespace Way2.Todo.Api.Infrastructure.Migrations
                         .HasDatabaseName("ix_users_email");
 
                     b.ToTable("users", (string)null);
+                });
+
+            modelBuilder.Entity("Way2.Todo.Api.Sync.ProcessedOperation", b =>
+                {
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("user_id");
+
+                    b.Property<Guid>("OperationId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("operation_id");
+
+                    b.Property<DateTime>("ProcessedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("processed_at");
+
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character(64)")
+                        .HasColumnName("request_hash")
+                        .IsFixedLength();
+
+                    b.Property<string>("ResultJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("result_json");
+
+                    b.Property<Guid>("TaskId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("task_id");
+
+                    b.HasKey("UserId", "OperationId")
+                        .HasName("pk_processed_operations");
+
+                    b.ToTable("processed_operations", (string)null);
+                });
+
+            modelBuilder.Entity("Way2.Todo.Api.Sync.TaskChangeLogEntry", b =>
+                {
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("user_id");
+
+                    b.Property<long>("Revision")
+                        .HasColumnType("bigint")
+                        .HasColumnName("revision");
+
+                    b.Property<string>("ChangeType")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("change_type");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("SnapshotJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("snapshot_json");
+
+                    b.Property<Guid>("TaskId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("task_id");
+
+                    b.HasKey("UserId", "Revision")
+                        .HasName("pk_task_change_log");
+
+                    b.ToTable("task_change_log", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_task_change_log_change_type", "change_type IN ('upsert', 'delete')");
+                        });
+                });
+
+            modelBuilder.Entity("Way2.Todo.Api.Sync.UserSyncCounter", b =>
+                {
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("user_id");
+
+                    b.Property<long>("LastRevision")
+                        .HasColumnType("bigint")
+                        .HasColumnName("last_revision");
+
+                    b.HasKey("UserId")
+                        .HasName("pk_user_sync_counters");
+
+                    b.ToTable("user_sync_counters", (string)null);
                 });
 
             modelBuilder.Entity("Way2.Todo.Api.Tasks.TodoTask", b =>
@@ -131,6 +221,36 @@ namespace Way2.Todo.Api.Infrastructure.Migrations
 
                             t.HasCheckConstraint("ck_tasks_version", "version >= 1");
                         });
+                });
+
+            modelBuilder.Entity("Way2.Todo.Api.Sync.ProcessedOperation", b =>
+                {
+                    b.HasOne("Way2.Todo.Api.Identity.User", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_processed_operations_users_user_id");
+                });
+
+            modelBuilder.Entity("Way2.Todo.Api.Sync.TaskChangeLogEntry", b =>
+                {
+                    b.HasOne("Way2.Todo.Api.Identity.User", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_task_change_log_users_user_id");
+                });
+
+            modelBuilder.Entity("Way2.Todo.Api.Sync.UserSyncCounter", b =>
+                {
+                    b.HasOne("Way2.Todo.Api.Identity.User", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_user_sync_counters_users_user_id");
                 });
 
             modelBuilder.Entity("Way2.Todo.Api.Tasks.TodoTask", b =>

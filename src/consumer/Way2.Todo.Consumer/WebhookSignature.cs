@@ -30,7 +30,9 @@ public static class WebhookSignature
         }
         if (timestamp is null || provided is null)
             return false;
-        if (Math.Abs(now.ToUnixTimeSeconds() - timestamp.Value) > toleranceSeconds)
+        // Compara com os limites da janela em vez de subtrair: "now - t" estoura com t extremo (long.MinValue).
+        var nowSeconds = now.ToUnixTimeSeconds();
+        if (timestamp < nowSeconds - toleranceSeconds || timestamp > nowSeconds + toleranceSeconds)
             return false;
 
         var prefix = Encoding.UTF8.GetBytes($"{timestamp}.");

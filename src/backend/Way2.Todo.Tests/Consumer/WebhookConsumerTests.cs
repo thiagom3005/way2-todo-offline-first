@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Logging.Abstractions;
 using Way2.Todo.Consumer;
 using Way2.Todo.Tests.Support;
 using ApiSignature = Way2.Todo.Api.Integrations.WebhookSignature;
@@ -127,6 +128,9 @@ public sealed class WebhookConsumerTests : IAsyncLifetime
             await DeliverAsync(client, eventId, body, secret: "another-secret-that-is-at-least-32-bytes"),
             await DeliverAsync(client, eventId, body, timestamp: now - 301),
             await DeliverAsync(client, eventId, body, timestamp: now + 301),
+            // "now - t" daria exatamente long.MinValue: antes estourava em Math.Abs e virava 500.
+            await DeliverAsync(client, eventId, body, timestamp: now + long.MinValue),
+            await DeliverAsync(client, eventId, body, timestamp: long.MaxValue),
             await DeliverAsync(client, eventId, body, signed: false),
         };
 
@@ -231,11 +235,51 @@ public sealed class WebhookConsumerTests : IAsyncLifetime
     }
 
     [Fact]
+    public void A_failed_write_is_undone_so_the_log_stays_readable()
+    {
+        Directory.CreateDirectory(directory);
+        FailingLogStream? stream = null;
+        var store = new EventStore(DataPath, NullLogger<EventStore>.Instance, path => stream = new FailingLogStream(path));
+        var (first, failed, third, taskId) = (Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid());
+        IncomingEvent Incoming(Guid id, int version) =>
+            IncomingEvent.TryParse(Encoding.UTF8.GetBytes(Envelope(id, "task.updated", taskId, version)), id.ToString())!;
+
+        store.Accept(Incoming(first, 1), DateTimeOffset.UtcNow, out _);
+        stream!.FailNextWrite = true;
+        Assert.Throws<IOException>(() => store.Accept(Incoming(failed, 2), DateTimeOffset.UtcNow, out _));
+        store.Accept(Incoming(third, 3), DateTimeOffset.UtcNow, out _);
+        store.Dispose();
+
+        // Reinício: o log tem só linhas inteiras e o evento que falhou não conta como recebido.
+        using var reopened = new EventStore(DataPath, NullLogger<EventStore>.Instance);
+        Assert.Equal(new[] { first, third }.Order(), reopened.Events().Events.Select(e => e.EventId).Order());
+    }
+
+    [Fact]
     public void A_corrupted_line_in_the_middle_fails_startup()
     {
         Directory.CreateDirectory(directory);
         File.WriteAllText(DataPath, "isto não é json\n{\"kind\":\"duplicate\"}\n");
 
         Assert.ThrowsAny<Exception>(() => Start());
+    }
+}
+
+/// <summary>Log que, quando armado, grava só metade da próxima linha e falha (disco cheio).</summary>
+public sealed class FailingLogStream(string path)
+    : FileStream(path, FileMode.OpenOrCreate, FileAccess.Write, FileShare.Read, bufferSize: 0)
+{
+    public bool FailNextWrite { get; set; }
+
+    public override void Write(ReadOnlySpan<byte> buffer)
+    {
+        if (!FailNextWrite)
+        {
+            base.Write(buffer);
+            return;
+        }
+        FailNextWrite = false;
+        base.Write(buffer[..(buffer.Length / 2)]);
+        throw new IOException("Disco cheio (simulado).");
     }
 }

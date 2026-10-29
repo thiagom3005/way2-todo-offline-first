@@ -85,10 +85,16 @@ public sealed class EventStore : IDisposable
     private int deliveries;
 
     public EventStore(string path, ILogger<EventStore> logger)
+        : this(path, logger, OpenLog)
+    {
+    }
+
+    /// <param name="open">Abre o log para append (os testes usam para simular falha de E/S).</param>
+    public EventStore(string path, ILogger<EventStore> logger, Func<string, FileStream> open)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
         var validLength = Load(path, logger);
-        file = new FileStream(path, FileMode.OpenOrCreate, FileAccess.Write, FileShare.Read);
+        file = open(path);
         if (file.Length > validLength)
         {
             logger.LogWarning("Última linha do log truncada (gravação interrompida) removida ao iniciar.");
@@ -178,11 +184,28 @@ public sealed class EventStore : IDisposable
         return stored;
     }
 
+    // Sem buffer: cada linha vai direto ao sistema operacional, e uma falha pode ser desfeita com SetLength.
+    private static FileStream OpenLog(string path) =>
+        new(path, FileMode.OpenOrCreate, FileAccess.Write, FileShare.Read, bufferSize: 0);
+
     private void Append(JsonObject line)
     {
         var bytes = Encoding.UTF8.GetBytes(line.ToJsonString(Json) + "\n");
-        file.Write(bytes);
-        file.Flush(flushToDisk: true);
+        var start = file.Position;
+        try
+        {
+            file.Write(bytes);
+            file.Flush(flushToDisk: true);
+        }
+        catch
+        {
+            // Gravação parcial (disco cheio, erro de E/S): sem desfazer, a próxima linha ficaria colada nela e
+            // o log corrompido no meio impediria o consumidor de subir. O evento não é indexado e o
+            // remetente recebe erro, então reenvia.
+            file.SetLength(start);
+            file.Position = start;
+            throw;
+        }
     }
 
     /// <summary>Reconstrói índice e projeção; devolve o tamanho do trecho válido do arquivo.</summary>

@@ -41,6 +41,13 @@ public sealed record TaskFields(
         else if (Category.Length > CategoryMaxLength)
             errors["category"] = [$"Categoria deve ter no máximo {CategoryMaxLength} caracteres."];
 
+        // U+0000 é JSON válido, mas o PostgreSQL não armazena: recusa na validação, por operação.
+        foreach (var (key, value) in new[] { ("title", Title), ("description", Description), ("category", Category) })
+        {
+            if (value?.Contains('\0') == true && !errors.ContainsKey(key))
+                errors[key] = ["Texto não pode conter o caractere nulo (U+0000)."];
+        }
+
         if (!Enum.IsDefined(Priority))
             errors["priority"] = ["Prioridade inválida."];
 

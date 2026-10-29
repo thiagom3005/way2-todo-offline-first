@@ -198,6 +198,94 @@ public sealed class SyncApiTests(PostgresFixture fixture)
     }
 
     [Fact]
+    public async Task Text_the_database_cannot_store_is_rejected_only_in_its_operation()
+    {
+        var (client, userId) = await fixture.NewUserClientAsync();
+        var (first, nul, third) = (Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid());
+
+        var results = await PushAsync(client,
+            Upsert(first, null, "Antes"),
+            Upsert(nul, null, "Com\u0000nulo"),
+            Upsert(third, null, "Depois"));
+
+        Assert.Equal(
+            [SyncStatuses.Applied, SyncStatuses.ValidationError, SyncStatuses.Applied],
+            results.Select(r => r.Status));
+        Assert.Contains("title", results[1].Errors!.Keys);
+        await using var db = fixture.CreateDbContext();
+        Assert.False(await db.Tasks.AnyAsync(t => t.Id == nul));
+        Assert.Equal(2, await db.OutboxEvents.CountAsync(e => e.UserId == userId));
+        await AssertServerStateAsync(userId, 2, 1, 2);
+    }
+
+    [Fact]
+    public async Task A_database_data_error_rolls_back_only_its_operation()
+    {
+        // Gatilho de teste: o PostgreSQL recusa este título com SQLSTATE 22023 (erro de dados),
+        // depois que a validação da aplicação já aprovou a operação.
+        const string forced = "forçar-sqlstate-22";
+        await using (var setup = fixture.CreateDbContext())
+        {
+            await setup.Database.ExecuteSqlRawAsync($"""
+                CREATE OR REPLACE FUNCTION test_force_data_exception() RETURNS trigger AS $$
+                BEGIN
+                  IF NEW.title = '{forced}' THEN
+                    RAISE EXCEPTION 'falha de dados simulada' USING ERRCODE = '22023';
+                  END IF;
+                  RETURN NEW;
+                END $$ LANGUAGE plpgsql;
+                CREATE TRIGGER test_force_data_exception BEFORE INSERT OR UPDATE ON tasks
+                  FOR EACH ROW EXECUTE FUNCTION test_force_data_exception();
+                """);
+        }
+        try
+        {
+            var (client, userId) = await fixture.NewUserClientAsync();
+            var (task, other) = (Guid.NewGuid(), Guid.NewGuid());
+            await PushOneAsync(client, Upsert(task, null, "Original"));
+
+            // [inválida (update), válida (create), válida (update na MESMA base da recusada)]
+            var results = await PushAsync(client,
+                Upsert(task, 1, forced),
+                Upsert(other, null, "Outra"),
+                Upsert(task, 1, "Editada"));
+
+            Assert.Equal(
+                [SyncStatuses.ValidationError, SyncStatuses.Applied, SyncStatuses.Applied],
+                results.Select(r => r.Status));
+            Assert.Contains("payload", results[0].Errors!.Keys);
+            // A recusada não deixou rastro: a versão não avançou (a 3ª aplicou sobre a base 1),
+            // e não houve revisão, operação processada nem evento para ela.
+            Assert.Equal(("Editada", 2), (results[2].ServerTask!.Title, results[2].ServerTask!.Version));
+            await AssertServerStateAsync(userId, 3, 1, 2, 3);
+            await using var db = fixture.CreateDbContext();
+            Assert.Equal(3, await db.OutboxEvents.CountAsync(e => e.UserId == userId));
+        }
+        finally
+        {
+            await using var cleanup = fixture.CreateDbContext();
+            await cleanup.Database.ExecuteSqlRawAsync("""
+                DROP TRIGGER IF EXISTS test_force_data_exception ON tasks;
+                DROP FUNCTION IF EXISTS test_force_data_exception();
+                """);
+        }
+    }
+
+    [Fact]
+    public async Task A_null_operation_is_rejected_without_failing_the_batch()
+    {
+        var (client, _) = await fixture.NewUserClientAsync();
+
+        var response = await client.PostAsync("/api/sync/push", new StringContent(
+            JsonSerializer.Serialize(new { deviceId = DeviceId, operations = new object?[] { null, Upsert(Guid.NewGuid(), null) } }),
+            System.Text.Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var results = (await response.Content.ReadFromJsonAsync<PushResponse>(SyncJson.Options))!.Results;
+        Assert.Equal([SyncStatuses.ValidationError, SyncStatuses.Applied], results.Select(r => r.Status));
+    }
+
+    [Fact]
     public async Task Users_cannot_read_or_change_each_other_tasks()
     {
         var (alice, aliceId) = await fixture.NewUserClientAsync();

@@ -191,8 +191,10 @@ export function buildMutation(
 }
 
 export function normalizeFields(fields: TaskFields): TaskFields {
-  const description = fields.description?.trim() ?? '';
-  const title = fields.title.trim();
+  // U+0000 (colado de outra fonte) é recusado pelo servidor: nunca chega à fila.
+  const clean = (text: string) => text.replaceAll('\u0000', '').trim();
+  const description = clean(fields.description ?? '');
+  const title = clean(fields.title);
   if (!title) {
     throw new Error('Título é obrigatório.');
   }
@@ -202,7 +204,7 @@ export function normalizeFields(fields: TaskFields): TaskFields {
     dueDate: fields.dueDate ? fields.dueDate : null,
     priority: fields.priority,
     status: fields.status,
-    category: fields.category.trim() || DEFAULT_CATEGORY,
+    category: clean(fields.category) || DEFAULT_CATEGORY,
   };
 }
 

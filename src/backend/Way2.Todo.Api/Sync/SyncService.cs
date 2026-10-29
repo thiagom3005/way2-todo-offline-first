@@ -1,5 +1,7 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
+using Npgsql;
 using Way2.Todo.Api.Infrastructure;
 using Way2.Todo.Api.Integrations;
 using Way2.Todo.Api.Tasks;
@@ -23,12 +25,27 @@ public sealed class SyncService(
         ["operationId"] = ["operationId já utilizado com outro conteúdo."],
     };
 
+    private static readonly Dictionary<string, string[]> MissingOperation = new()
+    {
+        ["operation"] = ["Operação vazia."],
+    };
+
+    private static readonly Dictionary<string, string[]> RejectedByDatabase = new()
+    {
+        ["payload"] = ["Valor não aceito pelo banco de dados."],
+    };
+
     public async Task<PushResponse> PushAsync(Guid userId, PushRequest request, CancellationToken ct = default)
     {
         var results = new List<PushResult>(request.Operations!.Count);
         // Ordem recebida, uma transação por operação: erro de negócio numa não invalida as demais.
         foreach (var operation in request.Operations!)
         {
+            if (operation is null)
+            {
+                results.Add(PushResult.Invalid(Guid.Empty, MissingOperation));
+                continue;
+            }
             var parsed = ParsedOperation.Parse(operation, out var errors);
             var result = parsed is null
                 ? PushResult.Invalid(operation.OperationId, errors)
@@ -87,6 +104,27 @@ public sealed class SyncService(
                 : PushResult.Invalid(operation.OperationId, ReusedOperationId);
         }
 
+        try
+        {
+            return await ApplyAsync(userId, operation, counter, transaction, ct);
+        }
+        catch (DbUpdateException ex) when (ex.InnerException is PostgresException { SqlState: var sqlState }
+            && sqlState.StartsWith("22", StringComparison.Ordinal))
+        {
+            // Erro de dados (classe 22) é determinístico: repetir não adianta. A operação vira
+            // validation_error; o savepoint do EF desfaz o comando, o using desfaz a transação inteira
+            // da operação (tarefa, revisão, change log, outbox) e as próximas seguem normalmente.
+            logger.LogWarning(
+                "Operação {OperationId} da tarefa {TaskId} recusada pelo banco (SQLSTATE {SqlState}); nada foi gravado.",
+                operation.OperationId, operation.TaskId, sqlState);
+            return PushResult.Invalid(operation.OperationId, RejectedByDatabase);
+        }
+    }
+
+    private async Task<PushResult> ApplyAsync(
+        Guid userId, ParsedOperation operation, UserSyncCounter counter,
+        IDbContextTransaction transaction, CancellationToken ct)
+    {
         // 3) baseVersion + mutação. Conflito ou validação: nada é gravado (rollback ao sair do using).
         var outcome = await ExecuteAsync(userId, operation, ct);
         if (outcome is not TaskCommandResult.Applied applied)

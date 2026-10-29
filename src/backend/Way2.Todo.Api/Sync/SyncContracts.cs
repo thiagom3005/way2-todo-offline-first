@@ -6,7 +6,7 @@ namespace Way2.Todo.Api.Sync;
 
 // Contratos HTTP de docs/SYNC_CONTRACT.md (§1 push, §2 pull).
 
-public sealed record PushRequest(Guid DeviceId, IReadOnlyList<PushOperation>? Operations);
+public sealed record PushRequest(Guid DeviceId, IReadOnlyList<PushOperation?>? Operations);
 
 public sealed record PushOperation(
     Guid OperationId,

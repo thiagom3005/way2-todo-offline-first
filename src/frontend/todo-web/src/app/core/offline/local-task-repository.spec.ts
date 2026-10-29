@@ -51,6 +51,15 @@ describe('LocalTaskRepository', () => {
     await Dexie.delete(db.name);
   });
 
+  it('remove o caractere nulo, que o servidor não aceita', async () => {
+    const task = await repo.create(
+      fields({ title: 'Con\u0000ferir', description: '\u0000', category: 'Ca\u0000mpo' }),
+    );
+
+    expect(task).toMatchObject({ title: 'Conferir', description: null, category: 'Campo' });
+    expect((await mutations())[0].payload).toMatchObject({ title: 'Conferir', category: 'Campo' });
+  });
+
   it('grava a tarefa e a mutação de criação juntas', async () => {
     const task = await repo.create(fields({ title: '  Nova  ', description: '  ', category: ' ' }));
 

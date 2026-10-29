@@ -37,5 +37,15 @@ services:
     ports:
       - "${API_PORT:-5080}:8080"
 
+  # Build de produção do PWA (Service Worker ativo) com /api encaminhado para a API na mesma origem.
+  # Dois "dispositivos" no mesmo navegador: http://localhost:4280 e http://127.0.0.1:4280.
+  web:
+    build:
+      context: src/frontend/todo-web
+    depends_on:
+      - api
+    ports:
+      - "${WEB_PORT:-4280}:80"
+
 volumes:
   pgdata:

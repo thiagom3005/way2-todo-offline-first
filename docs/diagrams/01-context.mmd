@@ -11,8 +11,9 @@ flowchart TB
     SE <-->|REST push/pull com JWT| WEB
     WEB --> API[ASP.NET Core: monólito modular]
     subgraph Backend[API e infraestrutura - Docker Compose]
-        API --> T[Identity + Tasks + Sync]
-        T --> PG[(PostgreSQL: tasks, user_sync_counters, processed_operations, task_change_log)]
-        W[BackgroundService - Fase C] -.-> PG
+        API --> T[Identity + Tasks + Sync + Integrations]
+        T --> PG[(PostgreSQL: tasks, user_sync_counters, processed_operations, task_change_log, integration_outbox)]
+        W[OutboxDispatcher - BackgroundService] --> PG
     end
-    W -.->|HTTP webhook at-least-once - Fase C| EXT[Consumidor externo simulado]
+    W -->|HTTP webhook assinado, at-least-once| EXT[Consumidor simulado - container separado]
+    EXT --> D[(Log JSONL de eventos + projeção somente leitura)]

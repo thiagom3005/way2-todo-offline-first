@@ -2,7 +2,7 @@
 
 > O contrato usa HTTP/JSON, UUIDs e revisão monotônica **por usuário**.
 >
-> **Estado da implementação:** login e [endpoints auxiliares](#endpoints-auxiliares-fase-a) (Fase A), `POST /api/sync/push`, `GET /api/sync/pull`, o `SyncEngine` do cliente e a resolução de conflitos (Fase B) estão implementados e testados. A `integration_outbox` e o webhook (§6) ainda são design (Fase C). Decisões de implementação estão marcadas com **Implementado:**.
+> **Estado da implementação:** login e [endpoints auxiliares](#endpoints-auxiliares-fase-a) (Fase A), `POST /api/sync/push`, `GET /api/sync/pull`, o `SyncEngine` do cliente e a resolução de conflitos (Fase B) estão implementados e testados. A Transactional Outbox, o dispatcher de webhooks e o consumidor simulado (§6) estão implementados e testados (Fase C). Decisões de implementação estão marcadas com **Implementado:**.
 
 ## Convenções
 
@@ -192,7 +192,7 @@ Na **mesma transação PostgreSQL** por operação aceita:
 2. `processed_operations` por `(user_id, operation_id)`: mesmo `request_hash` → `duplicate` com o resultado original; outro conteúdo → `validation_error`.
 3. `TaskCommandService` (create/update/delete com `baseVersion`). Em `conflict`/`validation_error`, rollback: **nada** é gravado e nenhuma revisão é consumida; o retry reavalia e dá o mesmo resultado (versões só crescem e tombstones são permanentes).
 4. Em `applied`: `last_revision + 1`, `task_change_log` com o snapshot e `processed_operations` com `{serverRevision, serverTask}`, no mesmo commit da tarefa.
-5. A `integration_outbox` entra nesta mesma transação na Fase C.
+5. A `integration_outbox` é gravada nesta mesma transação (Fase C, §6).
 
 Falha transitória devolve `5xx` para o lote inteiro; o cliente reenvia, e o que já tinha sido commitado volta como `duplicate`. A migração `AddSyncTables` não gera change log para tarefas anteriores: não havia nenhuma, porque a Fase A não tinha endpoint de escrita.
 
@@ -328,42 +328,105 @@ O estado `online` do navegador **não** prova conectividade com o backend. O ind
 - Reenvio de `inflight` muda só `retryCount`.
 - A sonda de saúde vem antes do congelamento: offline, as edições continuam coalescendo na mesma mutação `pending`.
 
-## 6. Integração externa: webhook
+## 6. Integração externa: webhook (contrato de eventos v1)
 
-O backend cria um evento de integração na Outbox durante o commit da tarefa. Um único `BackgroundService` tenta entregar em ordem por tarefa.
+**Implementado** (`Integrations/` na API e `src/consumer/Way2.Todo.Consumer`).
 
-`POST /webhooks/todo-events` (consumidor simulado)
+### Quando um evento nasce
+
+- Na **mesma transação** do push que aplica a mudança: tarefa, `user_sync_counters`, `task_change_log`, `processed_operations` e `integration_outbox` são confirmados juntos. Se o commit falhar, não há tarefa nem evento.
+- **Só** para operações `applied`. `duplicate`, `conflict` e `validation_error` retornam antes e não geram evento.
+- `UNIQUE(user_id, server_revision)` garante um evento por mudança aplicada.
+- Nenhuma chamada HTTP acontece dentro da transação. A entrega é assíncrona, por um `BackgroundService` (`OutboxDispatcher`) com `IHttpClientFactory`.
+- Mudanças anteriores à Fase C não geram evento (sem backfill). O consumidor trata `task.updated` de tarefa desconhecida como criação, porque o snapshot é completo.
+
+### Envelope
+
+`POST <Webhook:Url>` (no compose: `http://consumer:8080/webhooks/todo-events`)
 
 ```json
 {
-  "eventId": "ee47a272-8da7-41d7-b923-1e23c6e567f8",
-  "eventType": "TaskUpdated",
-  "occurredAt": "2026-10-28T12:15:00Z",
+  "schemaVersion": 1,
+  "eventId": "01a18556-ef43-761c-85b7-6464ef446763",
+  "eventType": "task.updated",
+  "occurredAt": "2026-10-29T01:47:07.252Z",
+  "userId": "44a9729e-53c0-46f6-96db-36ae8033bd88",
   "taskId": "8f719f2d-97d2-490c-84af-bf7996c4bc0c",
-  "taskVersion": 5,
-  "ownerId": "44a9729e-53c0-46f6-96db-36ae8033bd88",
+  "taskVersion": 2,
+  "serverRevision": 16,
   "task": {
     "id": "8f719f2d-97d2-490c-84af-bf7996c4bc0c",
-    "title": "Tarefa alterada no outro dispositivo",
+    "title": "Tarefa alterada",
     "description": null,
-    "dueDate": null,
+    "dueDate": "2026-10-30",
     "priority": "medium",
     "status": "pending",
     "category": "Geral",
-    "version": 5,
+    "version": 2,
     "createdAt": "2026-10-28T12:02:00Z",
-    "updatedAt": "2026-10-28T12:15:00Z",
+    "updatedAt": "2026-10-29T01:47:07.252Z",
     "deletedAt": null
   }
 }
 ```
 
-- `eventType`: `TaskCreated`, `TaskUpdated` ou `TaskDeleted`.
-- Consumidor retorna `2xx` mesmo para `eventId` já recebido, sem registrar evento de negócio duplicado.
-- `4xx/5xx`, timeout ou indisponibilidade: Outbox mantém evento, faz retry com backoff exponencial (por exemplo 2s → 4s → 8s, máximo de 5min) e logs; sem descartar definitivamente um evento sem alerta/intervenção.
-- **At-least-once**, não exactly-once. Se o POST foi recebido mas a confirmação se perdeu, ocorrerá retry e o consumidor deduplicará.
-- Para a prova, um worker único entrega eventos sequencialmente. Não promover eventos posteriores da mesma tarefa se evento anterior ainda estiver pendente. Ordenação entre tarefas diferentes não é requisito.
-- Em ambiente real, autenticar webhook com assinatura HMAC ou mTLS conforme contrato, limitar exposição de dados e segredos.
+**Campos:**
+
+| Campo | Significado |
+|---|---|
+| `eventType` | `task.created` (criação aplicada), `task.updated` (upsert com `baseVersion`) ou `task.deleted` (exclusão lógica) |
+| `task` | Snapshot completo da tarefa após a mudança, idêntico ao do `task_change_log` da mesma `serverRevision`. Em `task.deleted`, `task.deletedAt` vem preenchido (tombstone), e o consumidor remove logicamente pela `taskId`. |
+| `eventId` | UUID v7, imutável: o mesmo em todas as tentativas |
+| `taskVersion` | Versão da tarefa; serve de guarda de versão no consumidor |
+| `serverRevision` | Revisão monotônica do usuário |
+| `occurredAt` | Instante do commit |
+
+**Evolução:** campos novos são aditivos. Uma mudança incompatível vira `schemaVersion: 2`, e o consumidor recusa versões que não conhece (o evento fica em retry até ele ser atualizado).
+
+### Cabeçalhos e autenticação
+
+- `Content-Type: application/json`, `X-Way2-Event-Id` e `X-Way2-Event-Type`.
+- `X-Way2-Signature: t=<unix>,v1=<hex>`, com `v1 = HMAC-SHA256(segredo, "<t>." + corpo)` calculado sobre os **bytes exatos enviados**.
+  - Timestamp e assinatura são **gerados de novo a cada tentativa**, mesmo depois de longa indisponibilidade; `eventId` e payload não mudam.
+  - O consumidor verifica sobre o corpo cru, antes de desserializar, compara em tempo constante e aceita `t` dentro de ±5 min. Caso contrário responde **401**, que a API registra como Error, por indicar configuração errada.
+- O segredo (`Webhook:Secret` / `Consumer:WebhookSecret`, mínimo de 32 bytes) vem só de configuração. No compose ele vem de `WEBHOOK_SECRET`, com padrão *dev-only*.
+
+### Garantias de entrega
+
+| Garantia | Como |
+|---|---|
+| **At-least-once** (nunca exactly-once) | O evento só vira `delivered` com resposta `2xx`. Timeout, falha de conexão ou resposta perdida geram nova entrega do mesmo `eventId`. |
+| **Idempotência** | O consumidor deduplica por `eventId` e responde `2xx` com `duplicate: true` para repetições, sem repetir o efeito. |
+| **Ordem por tarefa (despacho)** | Um evento só é despachado quando **não existe nenhum evento anterior da mesma tarefa** com `status = 'pending'`, esteja ele em backoff, em retry ou reservado por outro ciclo. Tarefas diferentes não se bloqueiam. A ordem de *chegada* não é garantida: um timeout pode atrasar a resposta de uma tentativa anterior. Por isso o consumidor aplica só `taskVersion` maior que a conhecida. |
+| **Retry** | Backoff exponencial `2s × 2^(n-1)`, com expoente limitado, teto de 5 min e jitter de ±20%. Timeout de 10s por requisição. Redirects não são seguidos (3xx conta como falha). Toda resposta não-2xx é retentada; nada é descartado automaticamente. |
+| **Falhas persistidas** | `attempts`, `last_attempt_at`, `last_status_code`, `last_error` (só o tipo: `HTTP 503`, `Timeout`, `Falha de conexão (...)`, sem URL, corpo ou segredo) e `next_retry_at`. Log de Error na 10ª tentativa e a cada 10 seguintes. |
+| **Reinício** | Tudo está no PostgreSQL. A reserva (`locked_until` + `claim_token`, renovada antes de cada POST) expira e o próximo ciclo retoma. Resultado de reserva expirada é ignorado. `FOR UPDATE SKIP LOCKED` permite mais de uma instância da API. |
+| **Isolamento** | O dispatcher roda fora das requisições. Consumidor fora do ar não afeta push, pull nem `/api/health`. Timeout ou falha de conexão encerram o ciclo sem gastar tentativas dos outros eventos. Erro de banco num ciclo é logado e não derruba a API. |
+| **Quase tempo real** | Um sinal pós-commit (canal de capacidade 1, que nunca lança) acorda o dispatcher na hora; há polling de 2s como reserva. Na demonstração, a entrega levou 393 ms depois do commit. |
+
+### Acompanhamento
+
+- `GET /api/integrations/outbox` (Bearer): **só os eventos do usuário do token**.
+  - Contagens: `pending`, `retrying` (pendente que já falhou) e `delivered`.
+  - Saúde: `oldestPendingAgeSeconds` e `blockedTasks` (tarefas paradas num evento que já falhou).
+  - Lista: os 50 eventos mais recentes, com tentativas, próximo retry, último erro e `deliveredAt`.
+- Logs estruturados com `EventId`, `EventType`, `TaskId`, `Attempt`, `Result`, `ElapsedMs` e `NextRetryAt`.
+- **Intervenção manual** num evento com erro permanente: depois de corrigir a causa, `UPDATE integration_outbox SET next_retry_at = now() WHERE event_id = '<id>'` antecipa o retry. Marcar como `delivered` só se o consumidor confirmar que já tem o evento.
+
+### Consumidor simulado (somente leitura)
+
+- `POST /webhooks/todo-events`:
+  1. verifica a assinatura;
+  2. aplica a falha simulada, se houver;
+  3. deduplica por `eventId`;
+  4. grava no log JSONL com fsync e **só então** atualiza o índice e a projeção (guarda de versão; `task.deleted` marca exclusão);
+  5. responde `200 {"eventId": "...", "duplicate": false|true}`.
+- Consulta: `GET /events` (eventos, entregas por `eventId`, totais e duplicatas), `GET /tasks` (projeção) e `GET /` (painel com atualização automática).
+- `PUT/DELETE /failure-mode` com `{ "statusCode": 503, "remaining": 2, "delayMs": 0, "afterProcessing": false }`:
+  - `afterProcessing: true` grava e só depois responde o erro, simulando ack perdido;
+  - `delayMs` acima do timeout da API força timeout;
+  - sem `remaining`, a falha vale até ser removida.
+- O consumidor não tem credenciais de banco nem token da API, então **não consegue alterar tarefas**. Porta publicada só em `127.0.0.1:5090`; os endpoints de consulta e de falha não têm autenticação, por serem de demonstração.
 
 ## Endpoints auxiliares (Fase A)
 
@@ -376,8 +439,8 @@ Não fazem parte do fluxo de sincronização; existem para operação e demonstr
 
 | Cenário | Esperado |
 |---|---|
-| Criar offline e reconectar | Um `TaskCreated` no consumidor e tarefa em duas sessões após pull. |
-| HTTP falha depois do commit | Mesmo `operationId` responde `duplicate`, sem outro `TaskCreated`. |
+| Criar offline e reconectar | Um `task.created` no consumidor e tarefa em duas sessões após pull. |
+| HTTP falha depois do commit | Mesmo `operationId` responde `duplicate`, sem outro `task.created`. |
 | Dois dispositivos alteram `version=2` | Primeiro `applied`, segundo `conflict` e não sobrescreve o primeiro. |
 | Criar e apagar antes do primeiro push | Nenhuma operação/evento no servidor, tarefa não aparece. |
 | Editar durante push em voo | Novo intento fica pendente e dados locais recentes não se perdem. |

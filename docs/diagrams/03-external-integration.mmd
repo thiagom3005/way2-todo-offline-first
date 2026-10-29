@@ -1,25 +1,36 @@
 sequenceDiagram
     autonumber
-    participant C as Cliente sincronizador
-    participant API as ASP.NET Core
+    participant C as SyncEngine (cliente)
+    participant API as ASP.NET Core (SyncService)
     participant DB as PostgreSQL
-    participant W as BackgroundService
+    participant W as OutboxDispatcher (BackgroundService)
     participant X as Consumidor simulado
-    C->>API: Push operação offline (operationId)
-    API->>DB: Inicia transação
-    API->>DB: Altera tarefa + registra operação + change log
-    API->>DB: Insere evento na integration_outbox
-    API->>DB: Commit
-    API-->>C: applied
-    Note over C,X: Somente eventos confirmados no servidor saem para integrações
-    loop Enquanto houver eventos pendentes
-        W->>DB: Reserva próximo evento elegível
-        W->>X: POST /webhooks/todo-events (eventId)
-        alt Sucesso 2xx (inclusive duplicata)
-            X-->>W: 200/204
-            W->>DB: Marca deliveredAt
-        else Erro ou timeout
-            X--xW: Falha
-            W->>DB: Registra falha e nextRetryAt
+    C->>API: POST /api/sync/push (operationId, baseVersion)
+    API->>DB: BEGIN; FOR UPDATE em user_sync_counters
+    API->>DB: dedupe processed_operations (operationId + request_hash)
+    alt duplicate / conflict / validation_error
+        API-->>C: resultado sem mudança (nenhum evento criado)
+    else applied
+        API->>DB: tarefa + revisão + task_change_log + processed_operations + integration_outbox
+        API->>DB: COMMIT
+        API-->>C: applied
+        API-)W: sinal pós-commit (quase tempo real; polling 2s de reserva)
+    end
+    Note over API,X: Nenhuma chamada HTTP dentro da transação de negócio
+    loop Enquanto houver eventos elegíveis
+        W->>DB: reserva cabeças por tarefa (nenhum anterior pendente) FOR UPDATE SKIP LOCKED + claim_token
+        W->>DB: renova a reserva do evento
+        W->>X: POST /webhooks/todo-events (X-Way2-Event-Id, assinatura HMAC com t novo)
+        alt 2xx (inclusive duplicate=true)
+            X->>X: verifica HMAC, dedupe por eventId, fsync no log, projeção por versão
+            X-->>W: 200
+            W->>DB: status=delivered (se o claim_token ainda for o dele)
+        else 4xx/5xx/3xx
+            X-->>W: erro
+            W->>DB: attempts+1, last_error, next_retry_at (2s..5min ±20%)
+        else timeout ou conexão recusada
+            X--xW: sem resposta
+            W->>DB: attempts+1 e libera o resto do lote sem gastar tentativas
         end
     end
+    Note over W,X: At-least-once; a ordem de chegada é garantida pela guarda de versão do consumidor

@@ -3,11 +3,13 @@
 // Abre um Chromium (Edge ou Chrome) headless com perfil temporário, via CDP e sem dependências,
 // faz login, espera o Service Worker ficar ativo e controlando a página e então PARA de verdade os
 // containers web e api (origem inalcançável). Recarrega offline, cria/edita/conclui/exclui, recarrega
-// de novo e religa os containers, esperando a sincronização automática.
+// de novo e religa os containers, esperando a sincronização automática. Registra toda violação da CSP
+// (o roteiro falha se houver alguma) e confere os cabeçalhos de segurança servidos pelo nginx.
 //
 // Uso (na raiz do repositório, com `docker compose up -d` rodando):
 //   DEMO_PASSWORD=<senha de demonstração> node scripts/verify-pwa-offline.mjs
-// Variáveis opcionais: BROWSER (caminho do executável), DEMO_EMAIL (padrão demo2@way2.local), WEB_ORIGIN.
+// Variáveis opcionais: BROWSER (caminho do executável), DEMO_EMAIL (padrão demo2@way2.local), WEB_ORIGIN e
+// COMPOSE_PROJECT_NAME (para rodar contra um projeto compose isolado, com outras portas).
 // ATENÇÃO: executa `docker compose stop web api` e `docker compose start api web` durante o teste.
 import { execSync, spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
@@ -142,10 +144,19 @@ try {
       message.error ? reject(new Error(message.error.message)) : resolve(message.result);
     }
   });
-  const { targetId } = await send('Target.createTarget', { url: `${ORIGIN}/login` }, null);
+  const { targetId } = await send('Target.createTarget', { url: 'about:blank' }, null);
   ({ sessionId } = await send('Target.attachToTarget', { targetId, flatten: true }, null));
   await send('Page.enable');
   await send('Runtime.enable');
+  // Violações da CSP, guardadas na sessionStorage da aba para sobreviver às recargas (online e offline).
+  await send('Page.addScriptToEvaluateOnNewDocument', {
+    source: `document.addEventListener('securitypolicyviolation', (e) => {
+      const all = JSON.parse(sessionStorage.getItem('csp-violations') ?? '[]');
+      all.push(e.effectiveDirective + ' bloqueou ' + (e.blockedURI || 'inline') + ' em ' + e.documentURI);
+      sessionStorage.setItem('csp-violations', JSON.stringify(all));
+    });`,
+  });
+  await send('Page.navigate', { url: `${ORIGIN}/login` });
 
   // 1) Login online e primeira sincronização.
   await waitFor('tela de login', `!!document.querySelector('input[type=email]')`);
@@ -224,6 +235,13 @@ try {
     view: await evaluate(VIEW),
     serverTasks,
   });
+  const headers = await evaluate(
+    `fetch('/index.html', { cache: 'no-store' }).then(r => Object.fromEntries(['content-security-policy', 'x-content-type-options', 'x-frame-options', 'referrer-policy', 'permissions-policy'].map(h => [h, r.headers.get(h)])))`,
+  );
+  const cspViolations = await evaluate(`JSON.parse(sessionStorage.getItem('csp-violations') ?? '[]')`);
+  log('segurança', { headers, cspViolations });
+  if (!headers['content-security-policy']) throw new Error('Resposta sem Content-Security-Policy.');
+  if (cspViolations.length > 0) throw new Error('Violações da CSP: ' + cspViolations.join('; '));
   log('ok', {});
 } catch (error) {
   log('FALHA', { error: String(error?.stack ?? error) });

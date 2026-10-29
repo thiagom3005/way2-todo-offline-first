@@ -7,6 +7,7 @@ import { LocalDatabase } from '../../core/offline/local-database';
 import type { LocalTask, TaskFields } from '../../core/offline/local-models';
 import { LocalTaskRepository } from '../../core/offline/local-task-repository';
 import { SyncService } from '../../core/sync/sync.service';
+import { ConflictPanel, type ConflictDecision } from './conflict-panel';
 import { todayLocalIsoDate } from './local-date';
 import { TaskForm } from './task-form';
 import { TaskItem } from './task-item';
@@ -14,7 +15,7 @@ import { buildTaskSections, listCategories, NO_FILTERS, type TaskFilters } from 
 
 @Component({
   selector: 'app-tasks-page',
-  imports: [TaskForm, TaskItem],
+  imports: [ConflictPanel, TaskForm, TaskItem],
   templateUrl: './tasks.page.html',
 })
 export class TasksPage {
@@ -81,6 +82,20 @@ export class TasksPage {
     if (!confirm(`Excluir "${task.title}"?`)) return;
     await this.run(() => this.repository.delete(task.id));
     if (this.editing()?.id === task.id) this.editing.set(null);
+  }
+
+  protected async resolveConflict({ view, choice }: ConflictDecision): Promise<void> {
+    this.error.set(null);
+    try {
+      const outcome = await this.sync.resolve(view, choice);
+      if (outcome === 'changed') {
+        this.error.set(
+          'A tarefa mudou enquanto você decidia. Revise as versões e escolha de novo.',
+        );
+      }
+    } catch {
+      this.error.set('Não foi possível aplicar a decisão neste dispositivo. Tente novamente.');
+    }
   }
 
   protected setFilter<K extends keyof TaskFilters>(key: K, value: string): void {

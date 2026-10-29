@@ -1,11 +1,25 @@
 import { liveQuery, type Observable } from 'dexie';
 import type { LocalConflict, LocalMutation, LocalTask, ServerTask } from '../offline/local-models';
+import { buildMutation } from '../offline/local-task-repository';
 import type { TodoLocalDb } from '../offline/todo-local-db';
 import { newUuid } from '../offline/uuid';
 import type { PullResponse, PushOperation, PushResult } from './sync-contract';
 
 const CURSOR_KEY = 'pullCursor';
 const DEVICE_KEY = 'deviceId';
+
+/** Conflito aberto com as duas versões a comparar (cópia de trabalho atual × servidor mais recente). */
+export interface ConflictView {
+  conflict: LocalConflict;
+  local: LocalTask | undefined;
+  server: ServerTask | null;
+}
+
+/**
+ * `resolved`: decisão aplicada. `stale`: o conflito já foi resolvido (outra aba/clique repetido).
+ * `changed`: a tarefa mudou depois que a tela foi exibida; nada foi feito, o usuário revisa de novo.
+ */
+export type ResolutionOutcome = 'resolved' | 'stale' | 'changed';
 
 /**
  * Lado IndexedDB da sincronização. Cada método roda numa única transação `rw`: ou tudo persiste,
@@ -137,6 +151,130 @@ export class SyncStore {
 
   conflictCount$(): Observable<number> {
     return liveQuery(() => this.db.conflicts.count());
+  }
+
+  /** Conflitos abertos, inclusive de tarefas excluídas localmente (que não aparecem na lista). */
+  conflicts$(): Observable<ConflictView[]> {
+    return liveQuery(async () => {
+      const conflicts = await this.db.conflicts.orderBy('taskId').toArray();
+      const tasks = await this.db.local_tasks.bulkGet(conflicts.map((c) => c.taskId));
+      return conflicts
+        .map((conflict, i) => ({
+          conflict,
+          local: tasks[i],
+          server: newest(conflict.serverTask, tasks[i]?.remoteSnapshot) ?? null,
+        }))
+        .sort((a, b) => a.conflict.detectedAt.localeCompare(b.conflict.detectedAt));
+    });
+  }
+
+  /**
+   * "Usar versão do servidor": descarta as intenções locais da tarefa e aplica o snapshot mais novo
+   * do servidor (sem snapshot, a cópia local sai da lista).
+   */
+  useServerVersion(
+    taskId: string,
+    operationId: string,
+    expectedUpdatedAt: string | null,
+  ): Promise<ResolutionOutcome> {
+    return this.resolve(
+      taskId,
+      operationId,
+      expectedUpdatedAt,
+      async ({ conflict, task, server }) => {
+        if (server) {
+          await this.db.local_tasks.put(fromServer(server));
+          return;
+        }
+        await this.db.local_tasks.delete(taskId);
+        if (conflict.reason === 'validation_error' && task?.serverVersion != null) {
+          // O servidor tem a tarefa, mas não veio o snapshot: rebaixa o cursor para reobtê-la no pull.
+          await this.db.sync_metadata.put({ key: CURSOR_KEY, value: 0 });
+        }
+      },
+    );
+  }
+
+  /**
+   * "Manter minha alteração": substitui as intenções da tarefa por UMA nova operação, com novo
+   * `operationId` e `baseVersion` = versão atual do servidor, levando a cópia de trabalho atual
+   * (inclusive edições feitas com o conflito aberto). Se o servidor não tem a tarefa ou ela foi
+   * excluída lá, o conteúdo é recriado como uma NOVA tarefa — o registro original não ressuscita.
+   */
+  keepLocalVersion(
+    taskId: string,
+    operationId: string,
+    expectedUpdatedAt: string | null,
+  ): Promise<ResolutionOutcome> {
+    return this.resolve(
+      taskId,
+      operationId,
+      expectedUpdatedAt,
+      async ({ conflict, task, server }) => {
+        if (!task) return;
+        const now = this.now().toISOString();
+        const recreate =
+          conflict.reason !== 'validation_error' && (server === null || server.deletedAt !== null);
+
+        if (recreate) {
+          if (server) await this.db.local_tasks.put(fromServer(server));
+          else await this.db.local_tasks.delete(taskId);
+          const copy: LocalTask = {
+            ...task,
+            id: this.newId(),
+            updatedAt: now,
+            deletedAt: null,
+            serverVersion: null,
+            syncState: 'pending',
+            remoteSnapshot: undefined,
+          };
+          await this.db.local_tasks.add(copy);
+          await this.db.local_mutations.add(buildMutation(copy, 'upsert', now, this.newId));
+          return;
+        }
+
+        const rebased: LocalTask = {
+          ...task,
+          serverVersion: server ? server.version : task.serverVersion,
+          syncState: 'pending',
+          remoteSnapshot: undefined,
+        };
+        await this.db.local_tasks.put(rebased);
+        const action = task.deletedAt === null ? 'upsert' : 'delete';
+        await this.db.local_mutations.add(buildMutation(rebased, action, now, this.newId));
+      },
+    );
+  }
+
+  private resolve(
+    taskId: string,
+    operationId: string,
+    expectedUpdatedAt: string | null,
+    apply: (state: {
+      conflict: LocalConflict;
+      task: LocalTask | undefined;
+      server: ServerTask | null;
+    }) => Promise<void>,
+  ): Promise<ResolutionOutcome> {
+    return this.db.transaction(
+      'rw',
+      [this.db.local_tasks, this.db.local_mutations, this.db.conflicts, this.db.sync_metadata],
+      async () => {
+        const conflict = await this.db.conflicts.get(taskId);
+        if (conflict?.operationId !== operationId) return 'stale';
+        const task = await this.db.local_tasks.get(taskId);
+        if ((task?.updatedAt ?? null) !== expectedUpdatedAt) return 'changed';
+        const mutations = await this.mutationsOf(taskId);
+        // Nunca descarta algo já enviado: só resolve com a fila da tarefa parada no conflito.
+        if (mutations.some((m) => m.status === 'inflight')) return 'stale';
+
+        await this.db.local_mutations.bulkDelete(mutations.map((m) => m.seq!));
+        await this.db.conflicts.delete(taskId);
+        const server = newest(conflict.serverTask, task?.remoteSnapshot) ?? null;
+        await apply({ conflict, task, server });
+        return 'resolved' as const;
+      },
+    );
   }
 
   private async acknowledge(

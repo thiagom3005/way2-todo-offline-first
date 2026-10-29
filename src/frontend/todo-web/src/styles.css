@@ -173,6 +173,71 @@ button:disabled {
   padding: 4px 10px;
 }
 
+.conflicts {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border-color: var(--urgent);
+}
+
+.conflict {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.conflict h3 {
+  margin: 0;
+  font-size: 1rem;
+  overflow-wrap: anywhere;
+}
+
+.conflict-reason {
+  color: var(--urgent);
+  font-weight: 600;
+}
+
+.conflict-versions {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+.conflict-versions > div {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  min-width: 0;
+}
+
+.conflict-versions h4 {
+  margin: 0 0 4px;
+  font-size: 0.9rem;
+}
+
+.conflict-versions dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 8px;
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+.conflict-versions dt {
+  color: var(--muted);
+}
+
+.conflict-versions dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.conflict .actions {
+  flex-wrap: wrap;
+}
+
 .local.conflict {
   background: var(--urgent-bg);
   color: var(--urgent);
@@ -316,7 +381,8 @@ button:disabled {
 }
 
 @media (min-width: 720px) {
-  .row {
+  .row,
+  .conflict-versions {
     grid-template-columns: 1fr 1fr;
   }
 

@@ -10,6 +10,7 @@ import { newUuid } from '../../core/offline/uuid';
 import { SYNC_API } from '../../core/sync/http-sync-api';
 import { DEFAULT_SYNC_TIMING, SYNC_TIMING } from '../../core/sync/sync.service';
 import { FakeSyncServer } from '../../core/sync/testing/fake-sync-server';
+import { SyncDevice } from '../../core/sync/testing/sync-device';
 import { TasksPage } from './tasks.page';
 
 describe('TasksPage', () => {
@@ -159,6 +160,44 @@ describe('TasksPage', () => {
 
     await until(() => expect(sectionKeys()).toEqual(['category:casa']));
     expect(categoryFilter.value).toBe('');
+  });
+
+  it('conflito com outro dispositivo abre o painel e "Manter minha alteração" envia a versão local', async () => {
+    server.reachable = true;
+    await addTask('Original', 'Casa');
+    await until(() => expect(statusState()).toBe('synced'));
+
+    const other = new SyncDevice(`other-${newUuid()}`, server);
+    try {
+      await other.sync();
+      const [remote] = await other.db.local_tasks.toArray();
+      await other.repo.update(remote.id, { ...remote, title: 'Editada no outro dispositivo' });
+      await other.sync();
+
+      (card('Original').querySelector('button') as HTMLButtonElement).click(); // Editar
+      await stable();
+      await fill('title', 'Editada nesta tela');
+      el.querySelector('app-task-form form')!.dispatchEvent(new Event('submit'));
+
+      await until(() => expect(statusState()).toBe('conflict'));
+      const panel = el.querySelector('[data-testid="conflicts"]')!;
+      expect(panel.textContent).toContain('Editada no outro dispositivo');
+      expect(card('Editada nesta tela').textContent).toContain('conflito');
+
+      Array.from(panel.querySelectorAll('button'))
+        .find((b) => b.textContent!.includes('Manter minha alteração'))!
+        .click();
+
+      await until(() => expect(statusState()).toBe('synced'));
+      expect(server.tasks.get(remote.id)).toMatchObject({
+        title: 'Editada nesta tela',
+        version: 3,
+      });
+      expect(el.querySelector('[data-testid="conflicts"]')).toBeNull();
+    } finally {
+      other.db.close();
+      await Dexie.delete(other.db.name);
+    }
   });
 
   it('sair encerra a sessão mas preserva tarefas e pendências do usuário', async () => {

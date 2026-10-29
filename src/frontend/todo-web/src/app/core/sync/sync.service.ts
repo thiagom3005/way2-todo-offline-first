@@ -3,7 +3,7 @@ import { AuthService } from '../auth/auth.service';
 import type { TodoLocalDb } from '../offline/todo-local-db';
 import { SYNC_API } from './http-sync-api';
 import { SyncEngine, type SyncRunResult } from './sync-engine';
-import { SyncStore } from './sync-store';
+import { type ConflictView, type ResolutionOutcome, SyncStore } from './sync-store';
 
 /** Estados do indicador (docs/SYNC_CONTRACT.md §4). */
 export type SyncStatus =
@@ -59,6 +59,7 @@ export class SyncService {
 
   readonly pendingCount = signal(0);
   readonly conflictCount = signal(0);
+  readonly conflicts = signal<ConflictView[]>([]);
   readonly lastSyncedAt = signal<Date | null>(null);
   readonly nextRetryAt = signal<Date | null>(null);
   private readonly running = signal(false);
@@ -97,9 +98,11 @@ export class SyncService {
 
     const pending = store.pendingCount$().subscribe((count) => this.pendingCount.set(count));
     const conflicts = store.conflictCount$().subscribe((count) => this.conflictCount.set(count));
+    const views = store.conflicts$().subscribe((list) => this.conflicts.set(list));
     cleanup.push(
       () => pending.unsubscribe(),
       () => conflicts.unsubscribe(),
+      () => views.unsubscribe(),
     );
 
     const now = () => void this.syncNow();
@@ -130,7 +133,25 @@ export class SyncService {
     this.outcome.set('none');
     this.pendingCount.set(0);
     this.conflictCount.set(0);
+    this.conflicts.set([]);
     this.nextRetryAt.set(null);
+  }
+
+  /**
+   * Decisão explícita do usuário para um conflito. Vale só para o conflito exibido e só se a tarefa
+   * não mudou desde então; a nova operação (se houver) é enviada em seguida.
+   */
+  async resolve(view: ConflictView, choice: 'server' | 'local'): Promise<ResolutionOutcome> {
+    const store = this.session?.store;
+    if (!store) return 'stale';
+    const { taskId, operationId } = view.conflict;
+    const expectedUpdatedAt = view.local?.updatedAt ?? null;
+    const outcome =
+      choice === 'server'
+        ? await store.useServerVersion(taskId, operationId, expectedUpdatedAt)
+        : await store.keepLocalVersion(taskId, operationId, expectedUpdatedAt);
+    if (outcome === 'resolved') this.requestSync(0);
+    return outcome;
   }
 
   /** Agenda uma execução em breve (debounce), p.ex. depois de uma escrita local. */

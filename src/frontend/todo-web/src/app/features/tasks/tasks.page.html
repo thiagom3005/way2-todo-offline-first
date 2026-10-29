@@ -66,6 +66,10 @@
 }
 
 <main class="layout">
+  @if (sync.conflicts().length > 0) {
+    <app-conflict-panel [conflicts]="sync.conflicts()" (decide)="resolveConflict($event)" />
+  }
+
   <app-task-form
     [task]="editing()"
     [categories]="categoryLabels()"

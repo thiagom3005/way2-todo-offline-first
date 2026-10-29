@@ -64,7 +64,8 @@ export class TasksPage {
     const editing = this.editing();
     await this.run(async () => {
       if (editing) {
-        await this.repository.update(editing.id, fields);
+        // A cópia exibida ao abrir o formulário: mudança remota nesse meio-tempo vira conflito.
+        await this.repository.update(editing.id, fields, editing);
         this.editing.set(null);
       } else {
         await this.repository.create(fields);

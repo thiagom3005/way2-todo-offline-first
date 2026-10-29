@@ -53,8 +53,20 @@ export class LocalTaskRepository {
     return task;
   }
 
-  update(taskId: string, fields: TaskFields): Promise<LocalTask> {
-    return this.change(taskId, () => fields);
+  /**
+   * Edição de campos. Com `origin` (a cópia que o formulário exibiu ao abrir): se o conteúdo mudou por
+   * baixo do formulário — pull de outro dispositivo, outra aba —, a intenção se baseia na versão de
+   * origem e o servidor responde conflito, em vez de sobrescrever em silêncio. Se só a versão avançou
+   * (ack da própria edição), não há conflito. O status vem da cópia atual: o formulário não o edita, e
+   * um "concluir" feito com o formulário aberto não é desfeito.
+   */
+  update(taskId: string, fields: TaskFields, origin?: LocalTask): Promise<LocalTask> {
+    if (!origin) return this.change(taskId, () => fields);
+    return this.change(
+      taskId,
+      (current) => ({ ...fields, status: current.status }),
+      (current) => (contentChanged(origin, current) ? origin.serverVersion : current.serverVersion),
+    );
   }
 
   setStatus(taskId: string, status: TaskFields['status']): Promise<LocalTask> {
@@ -103,6 +115,7 @@ export class LocalTaskRepository {
   private async change(
     taskId: string,
     next: (current: LocalTask) => TaskFields,
+    baseVersionOf: (current: LocalTask) => number | null = (current) => current.serverVersion,
   ): Promise<LocalTask> {
     const now = this.timestamp();
     return this.db.transaction('rw', this.db.local_tasks, this.db.local_mutations, async () => {
@@ -126,7 +139,8 @@ export class LocalTaskRepository {
           queuedAt: now,
         });
       } else {
-        await this.db.local_mutations.add(buildMutation(updated, 'upsert', now, this.newId));
+        const base = { ...updated, serverVersion: baseVersionOf(current) };
+        await this.db.local_mutations.add(buildMutation(base, 'upsert', now, this.newId));
       }
       return updated;
     });
@@ -139,6 +153,17 @@ export class LocalTaskRepository {
   private timestamp(): string {
     return this.now().toISOString();
   }
+}
+
+/** Campos editáveis pelo formulário (o status tem ação própria) diferentes entre duas cópias. */
+function contentChanged(origin: LocalTask, current: LocalTask): boolean {
+  return (
+    origin.title !== current.title ||
+    origin.description !== current.description ||
+    origin.dueDate !== current.dueDate ||
+    origin.priority !== current.priority ||
+    origin.category !== current.category
+  );
 }
 
 /** Conflito aberto continua visível até a decisão do usuário, mesmo com novas edições locais. */

@@ -254,6 +254,61 @@ describe('Resolução de conflitos', () => {
     expect(await b.task(task.id)).toMatchObject({ serverVersion: 1, syncState: 'synced' });
   });
 
+  it('formulário aberto durante um pull não sobrescreve a mudança do outro dispositivo', async () => {
+    const task = await a.repo.create(fields({ title: 'Original' }));
+    await a.sync();
+    await b.sync();
+    const openedForm = (await a.task(task.id))!; // A abre "Editar" (v1)
+
+    await b.repo.update(task.id, fields({ title: 'Mudança do B' }));
+    await b.sync(); // servidor em v2
+    await a.sync(); // pull traz v2 para a cópia de A (sem pendências)
+    expect(await a.task(task.id)).toMatchObject({ title: 'Mudança do B', serverVersion: 2 });
+
+    await a.repo.update(task.id, fields({ title: 'Edição do A' }), openedForm);
+    expect(await a.mutations()).toMatchObject([{ baseVersion: 1 }]);
+    await a.sync();
+
+    expect(server.tasks.get(task.id)).toMatchObject({ title: 'Mudança do B', version: 2 });
+    expect(await a.db.conflicts.get(task.id)).toMatchObject({
+      reason: 'version_mismatch',
+      serverTask: { title: 'Mudança do B' },
+    });
+    expect(await a.task(task.id)).toMatchObject({ title: 'Edição do A', syncState: 'conflict' });
+  });
+
+  it('formulário aberto durante o ack da própria edição não gera conflito falso', async () => {
+    const task = await a.repo.create(fields({ title: 'v1' }));
+    await a.sync();
+    await a.repo.update(task.id, fields({ title: 'v2 local' }));
+    const openedForm = (await a.task(task.id))!; // pendente, serverVersion 1
+    await a.sync(); // ack: v2 no servidor, mesmo conteúdo
+
+    await a.repo.update(task.id, fields({ title: 'v3 pelo formulário' }), openedForm);
+    await a.sync();
+
+    expect(await a.db.conflicts.count()).toBe(0);
+    expect(server.tasks.get(task.id)).toMatchObject({ title: 'v3 pelo formulário', version: 3 });
+  });
+
+  it('concluir com o formulário aberto não é desfeito ao salvar', async () => {
+    const task = await a.repo.create(fields({ title: 'Tarefa' }));
+    await a.sync();
+    const openedForm = (await a.task(task.id))!;
+    await a.repo.setStatus(task.id, 'completed');
+
+    // O formulário ainda tem status "pending" do momento em que abriu.
+    await a.repo.update(
+      task.id,
+      fields({ title: 'Tarefa renomeada', status: 'pending' }),
+      openedForm,
+    );
+    await a.sync();
+
+    expect(await a.task(task.id)).toMatchObject({ title: 'Tarefa renomeada', status: 'completed' });
+    expect(server.tasks.get(task.id)).toMatchObject({ status: 'completed' });
+  });
+
   it('é idempotente e não age sobre decisões desatualizadas', async () => {
     const { task, conflict } = await concurrentEdit();
     const seen = await updatedAt(b, task.id);

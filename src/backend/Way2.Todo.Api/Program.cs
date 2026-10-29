@@ -21,7 +21,7 @@ builder.Services.ConfigureHttpJsonOptions(json =>
 builder.Services.AddIdentityModule();
 builder.Services.AddScoped<TaskCommandService>();
 builder.Services.AddScoped<SyncService>();
-builder.Services.AddSingleton<OutboxSignal>();
+builder.Services.AddIntegrationsModule();
 
 var app = builder.Build();
 

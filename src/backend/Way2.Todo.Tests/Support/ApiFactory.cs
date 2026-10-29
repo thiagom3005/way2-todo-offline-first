@@ -34,5 +34,7 @@ public sealed class ApiFactory(string connectionString) : WebApplicationFactory<
         builder.UseSetting("DemoSeed:Users:0:Password", Password);
         builder.UseSetting("DemoSeed:Users:1:Email", BobEmail);
         builder.UseSetting("DemoSeed:Users:1:Password", Password);
+        // Testes chamam o dispatcher diretamente (DispatchOnceAsync); o loop em segundo plano fica desligado.
+        builder.UseSetting("Outbox:DispatcherEnabled", "false");
     }
 }

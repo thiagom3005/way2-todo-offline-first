@@ -53,7 +53,7 @@ A arquitetura é um **monólito modular** (ASP.NET Core + PostgreSQL + Angular),
 | Sincronização automática e estado visível | `SyncEngine` com sonda real (`/api/health`), backoff e gatilhos; indicador com 7 estados | 19 cenários do engine + 11 do serviço; `navigator.onLine` nunca é tomado como prova de conexão |
 | Conflitos entre dispositivos sem perda | `baseVersion`, conflito explícito, painel "sua versão × servidor" | 17 testes de resolução + conflito real entre dois dispositivos no navegador |
 | Integração externa quase em tempo real, somente leitura | Outbox no mesmo commit, `OutboxDispatcher`, webhook HMAC, consumidor idempotente | Testes de outbox e dispatcher (500, timeout, 3xx/4xx, backoff, ordem estrita, concorrência, reinício), do consumidor e 2 de ponta a ponta; 503, consumidor fora do ar e ack perdido validados com Docker |
-| Dimensionamento para ~1.000 usuários | API stateless, lock por usuário, índices por chave, paginação | Estimativa explícita na seção [Dimensionamento](#dimensionamento-para-1000-usuários-simultâneos) (**não** é medição) |
+| Dimensionamento para ~1.000 usuários | API stateless, lock por usuário, índices por chave, paginação | Estimativa explícita + teste de carga local com 1.000 usuários: 116 req/s, 0 erros, p95 de até 65 ms ([Dimensionamento](#dimensionamento-para-1000-usuários-simultâneos)) |
 
 ### Rastreabilidade: requisito → código → testes
 
@@ -202,6 +202,8 @@ DEMO_PASSWORD=Way2Demo!2026 node scripts/verify-pwa-offline.mjs
 ```
 
 O script confere se o Service Worker está ativo e controlando a página e então **para de verdade** os containers `web` e `api`. Em seguida recarrega, cria, edita, conclui e exclui offline, religa os containers e espera a sincronização automática. No fim, confere os cabeçalhos de segurança e falha se houver qualquer violação de CSP. Aceita `WEB_ORIGIN` e `COMPOSE_PROJECT_NAME`, para rodar contra um projeto compose isolado.
+
+**Teste de carga** com 1.000 usuários simulados (`scripts/load-test.mjs`): resultados e roteiro de reprodução na seção [Dimensionamento](#dimensionamento-para-1000-usuários-simultâneos).
 
 **Última validação completa (29/10/2026)**, num clone limpo e num projeto compose isolado: backend e frontend com todos os testes passando, `npm audit` sem vulnerabilidades, build de produção sem avisos, `verify-pwa-offline` aprovado sem violações de CSP, e webhook validado com falha e recuperação.
 
@@ -402,7 +404,9 @@ O IndexedDB e a sessão no `localStorage` não são criptografados; a proteção
 
 ## Dimensionamento para ~1.000 usuários simultâneos
 
-**Nenhum teste de carga foi executado.** Os números abaixo são uma estimativa a partir do comportamento do código, com as premissas explícitas.
+A estimativa abaixo foi feita a partir do comportamento do código e depois **medida num teste de carga local com 1.000 usuários**. O teste confirma a estimativa neste hardware, mas não é uma medição de capacidade em produção.
+
+### Estimativa
 
 **Premissas:** 1.000 usuários com o app aberto e visível ao mesmo tempo; cada um faz em média 1 alteração por minuto; uma alteração gera 1 operação de push.
 
@@ -420,14 +424,82 @@ O IndexedDB e a sessão no `localStorage` não são criptografados; a proteção
 - A API é stateless (JWT) e escala horizontalmente atrás de um balanceador; o dispatcher já é seguro com várias instâncias.
 - O pool padrão do Npgsql (100 conexões) atende ~120 req/s com transações de poucos milissegundos.
 
-**Gargalos conhecidos e quando agir:**
-1. **Dispatcher sequencial:** dentro de um ciclo os POSTs saem um de cada vez. Com consumidor rápido (~10 ms) são ~100 eventos/s por instância, acima dos ~17/s estimados; com consumidor lento (~200 ms) seriam ~5/s, e a fila cresceria. Mitigação: mais instâncias da API, ou paralelizar por tarefa dentro do lote. Sinal: idade do evento pendente mais antigo crescendo.
-2. **Login (PBKDF2):** o endpoint mais caro em CPU, de propósito. Um pico de logins legítimos concentra CPU; o rate limit protege contra abuso, não contra pico.
-3. **Crescimento do change log e da outbox:** sem retenção, o primeiro pull de um dispositivo novo baixa todo o histórico do usuário. Mitigação: snapshot inicial + retenção.
-4. **`/api/health` consulta o banco** em cada ciclo de cada cliente. É barato, mas poderia ter cache de 1 a 2s.
-5. **Rate limit em memória:** com várias instâncias, o limite vale por instância.
+### Teste de carga local (30/10/2026)
 
-**Como validar antes de produção:** um cenário k6 (ou similar) com o ciclo real do cliente (health, pull a cada 30s, push ocasional), medindo p95 de push e pull, CPU e pool do PostgreSQL, idade da outbox e taxa de conflitos, em hardware parecido com o de produção.
+**Ambiente:** um notebook (Intel i7-1255U, 10 núcleos e 12 threads, 15,7 GB de RAM) rodando **ao mesmo tempo** o gerador de carga (Node.js 24) e a stack completa no Docker Desktop (VM de 12 vCPUs e 7,6 GB). As requisições passam pelo nginx, como as do navegador. Gerador e servidor disputam a mesma máquina, o que tende a piorar os números.
+
+**Cenário** ([`scripts/load-test.mjs`](scripts/load-test.mjs)): 1.000 usuários, cada um com conta, cursor e tarefas próprios, reproduzindo o ciclo do cliente:
+- health + pull a cada 30s;
+- em média 1 alteração por minuto, com debounce de 1s e então health + push + pull;
+- uma operação por tarefa por push, e operação enviada congelada nos retries.
+
+As fases foram: rampa de 60s; **5 min de carga nominal**; 2 min a 3× a taxa (equivalente a ~3.000 usuários); e uma reconexão simultânea, com os 1.000 usuários voltando de uma queda, cada um com 3 alterações feitas offline, numa janela de 2s.
+
+| Fase | Vazão | Erros | Latência p50 / p95 / p99 |
+|---|---|---|---|
+| **Nominal (1.000 usuários, 5 min)** | **116 req/s** (pico de 171/s) | **0** em 34.798 | health 7 / 16 / 26 ms; pull 8 / 18 / 28 ms; push 29 / 65 / 200 ms |
+| Estresse 3× (2 min) | 345 req/s (pico de 492/s) | 0 em 41.358 | health 32 / 238 / 605 ms; pull 33 / 218 / 536 ms; push 105 / 887 / 1.741 ms |
+| Reconexão simultânea | 3.000 alterações enviadas em 2s | 0 em 3.000 | push p95 de 10,1s (máximo de 11,5s); todos sincronizados em 14,9s |
+
+Na reconexão, nenhuma requisição passou do timeout do cliente (5s para o health, 15s para push e pull).
+
+**Entrega dos eventos ao consumidor:**
+
+| Fase | Eventos criados | Atraso até o consumidor (p50 / p95 / máximo) |
+|---|---|---|
+| Nominal | 16,5/s | **0,04s / 0,15s / 2,6s** |
+| Estresse 3× | 48,7/s | 91s / 105s / 105s |
+| Reconexão | rajada de ~160/s | até 149s |
+
+**Integridade:** as 13.751 operações aplicadas aparecem, uma vez cada:
+- em `processed_operations`;
+- no change log, sem buraco no cursor de nenhum usuário;
+- na outbox, todas entregues na 1ª tentativa;
+- no consumidor, sem duplicatas.
+
+Foram criadas 4.693 tarefas. A fila da outbox drenou 2,5 min depois do fim da carga, sem perda.
+
+**Recursos** (amostras a cada 5s):
+
+| Fase | API | PostgreSQL |
+|---|---|---|
+| Nominal | ~0,55 vCPU (pico de 1,15), 129 MiB | ~0,2 vCPU (pico de 0,53), 101 MiB |
+| Estresse 3× | ~2,2 vCPUs (pico de 2,8), 181 MiB | ~1,2 vCPU (pico de 1,5), 326 MiB |
+
+O nginx usou até 31 MiB e o consumidor até 55 MiB.
+
+**Conclusão:** a carga estimada para 1.000 usuários foi atendida sem erros, com p95 de até 65 ms e entrega dos eventos em tempo real. A partir de ~3× essa carga aparecem os dois limites medidos abaixo, ainda sem erros nem perda de dados, mas com latência alta e fila na outbox.
+
+### Gargalos e quando agir
+
+1. **Conexões com o banco (medido):** o pool padrão do Npgsql (100 conexões) é igual ao `max_connections` padrão do PostgreSQL (100).
+   - **O que aconteceu:** no estresse e na reconexão o pool se esgotou. As requisições esperaram por conexão (daí o push de 10s) e até conexões administrativas foram recusadas ("too many clients"); as conexões ociosas continuaram ocupando o banco por alguns minutos depois.
+   - **Mitigação:** `Maximum Pool Size` abaixo do `max_connections`, com folga para administração e para o dispatcher; `max_connections` ajustado ao hardware; e, com várias instâncias da API, um PgBouncer.
+2. **Vazão do dispatcher (medido):** os POSTs saem um de cada vez.
+   - **O que aconteceu:** nesta máquina foram ~40 eventos/s com o banco livre (~21 ms por evento, incluindo o fsync do consumidor) e de 15 a 18/s disputando conexões com a API. O dispatcher acompanha a carga nominal em tempo real; acima de ~40 eventos/s a fila cresce, sem perda, e drena depois.
+   - **Mitigação:** mais instâncias da API (já é seguro) ou paralelizar por tarefa dentro do lote. Sinal de alerta: a idade do evento pendente mais antigo crescendo.
+3. **Login (PBKDF2, não testado):** é o endpoint mais caro em CPU, de propósito. Um pico de logins legítimos concentra CPU; o rate limit protege contra abuso, não contra pico.
+4. **Crescimento do change log e da outbox:** sem retenção, o primeiro pull de um dispositivo novo baixa todo o histórico do usuário. Mitigação: snapshot inicial + retenção.
+5. **`/api/health` consulta o banco** em cada ciclo de cada cliente. É barato, mas poderia ter cache de 1 a 2s.
+6. **Rate limit em memória:** com várias instâncias, o limite vale por instância.
+
+### Como reproduzir o teste de carga
+
+Numa stack isolada (projeto, portas, rede e volumes próprios), sem tocar num ambiente existente. Os comandos usam sintaxe do Bash:
+
+```bash
+export COMPOSE_PROJECT_NAME=way2-load POSTGRES_PORT=57433 API_PORT=57080 WEB_PORT=57280 CONSUMER_PORT=57090 COMPOSE_SUBNET=172.30.243.0/24 WEB_PROXY_IP=172.30.243.10
+docker compose up -d --build
+docker compose exec -T db psql -U way2 -d way2_todo -tAc "with ins as (insert into users (id, email, password_hash, created_at) select gen_random_uuid(), 'load-' || g || '@load.test', 'nao-usado', now() from generate_series(1, 1000) g returning id, email) select json_agg(json_build_object('id', id, 'email', email)) from ins" > usuarios-carga.json
+node scripts/load-test.mjs usuarios-carga.json http://127.0.0.1:57280 dev-only-signing-key-do-not-use-in-production-0123456789 resultado-carga.json
+docker compose exec -T db psql -U way2 -d way2_todo -tA -v prefix=load < scripts/load-test-integrity.sql
+docker compose down -v
+```
+
+- **Chave JWT:** o script emite os tokens localmente com a chave *dev-only* padrão do compose (não usa login). Por isso as contas de teste são criadas direto no banco.
+- **Conferência:** rode o SQL de integridade depois que a outbox drenar; os contadores devem coincidir com as operações aplicadas informadas pelo script.
+- **Limpeza:** com `COMPOSE_PROJECT_NAME=way2-load` definido, o `down -v` remove **somente** a stack de teste. Apague também os dois arquivos JSON gerados.
+- **Antes de produção:** repetir em hardware equivalente ao de produção, com o gerador de carga numa máquina separada e incluindo login em massa.
 
 ## Decisões e trade-offs
 
@@ -483,7 +555,7 @@ O IndexedDB e a sessão no `localStorage` não são criptografados; a proteção
 - **Erro permanente num webhook** bloqueia só a sua tarefa até intervenção manual; não há dead letter automático.
 - **Atualização do app** chega pelo Service Worker na recarga seguinte, sem aviso de "nova versão".
 - **Cobertura de navegadores:** a recarga offline foi validada no Edge/Chromium (headless). Firefox, Safari e um celular físico não foram testados; o layout foi revisado em 375px no navegador.
-- **Sem teste de carga:** o dimensionamento é estimativa.
+- **Teste de carga só local:** feito num notebook, com gerador e servidor na mesma máquina; não substitui um teste em hardware de produção, e login em massa não foi testado. Ele mostrou que o pool de conexões da API, por padrão igual ao `max_connections` do PostgreSQL, se esgota a partir de ~3× a carga nominal.
 
 ## Demonstração × produção
 
@@ -506,7 +578,7 @@ O IndexedDB e a sessão no `localStorage` não são criptografados; a proteção
 - Paralelizar o dispatcher por tarefa dentro do lote; dead letter com reprocessamento manual pela interface.
 - Notificação em tempo real para clientes online (SignalR) como **gatilho** de pull, sem substituir o protocolo.
 - Background Sync como melhoria progressiva onde houver suporte.
-- Teste de carga com o ciclo real do cliente (k6) antes de produção.
+- Pool de conexões abaixo do `max_connections` (ou PgBouncer com várias instâncias) e novo teste de carga em hardware equivalente ao de produção, com o gerador numa máquina separada.
 
 ## Configuração e endpoints
 
@@ -542,6 +614,8 @@ Contrato completo, com exemplos e regras: [`docs/SYNC_CONTRACT.md`](docs/SYNC_CO
 ```text
 docker-compose.yml, Way2.Todo.slnx, .env.example, dotnet-tools.json
 scripts/verify-pwa-offline.mjs        # verificação real do PWA offline (Chromium headless + docker compose)
+scripts/load-test.mjs                 # teste de carga: N usuários simulando o ciclo real do cliente
+scripts/load-test-integrity.sql       # conferência de integridade depois do teste de carga
 docs/SYNC_CONTRACT.md                 # contrato HTTP de sincronização e de eventos
 docs/diagrams/                        # contexto, fluxo de sincronização, integração externa (Mermaid)
 src/backend/Way2.Todo.Api/            # monólito modular
